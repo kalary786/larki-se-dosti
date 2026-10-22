@@ -1,0 +1,105 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function profileKeys() {
+      return [
+        'uid',
+        'username',
+        'displayName',
+        'shortId',
+        'dateOfBirth',
+        'gender',
+        'country',
+        'photos',
+        'coins',
+        'level',
+        'isOnline',
+        'lastSeen',
+        'createdAt',
+        'onboardingCompleted',
+        'isGoogleLinked'
+      ];
+    }
+
+    function validProfile(data) {
+      return data.keys().hasOnly(profileKeys())
+        && data.uid is string
+        && data.username is string
+        && data.displayName is string
+        && data.shortId is int
+        && data.dateOfBirth is string
+        && data.gender is string
+        && data.country is string
+        && data.photos is list
+        && data.coins is int
+        && data.level is int
+        && data.isOnline is bool
+        && data.lastSeen is int
+        && data.createdAt is int
+        && data.onboardingCompleted is bool
+        && data.isGoogleLinked is bool;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+
+      allow create: if isOwner(uid)
+        && validProfile(request.resource.data)
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.coins == 50
+        && request.resource.data.level == 1
+        && request.resource.data.shortId > 0;
+
+      allow update: if isOwner(uid)
+        && validProfile(request.resource.data)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.shortId == resource.data.shortId
+        && request.resource.data.coins == resource.data.coins
+        && request.resource.data.level == resource.data.level
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.dateOfBirth == resource.data.dateOfBirth
+        && (
+          request.resource.data.username == resource.data.username
+          || resource.data.onboardingCompleted == false
+        );
+
+      allow delete: if isOwner(uid);
+    }
+
+    match /usernames/{username} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && !exists(/databases/$(database)/documents/usernames/$(username))
+        && request.resource.data.keys().hasOnly(['uid'])
+        && request.resource.data.uid == request.auth.uid;
+
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+
+      allow update: if false;
+    }
+
+    match /counters/users {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['next'])
+        && request.resource.data.next == 2;
+
+      allow update: if signedIn()
+        && request.resource.data.keys().hasOnly(['next'])
+        && request.resource.data.next == resource.data.next + 1;
+
+      allow delete: if false;
+    }
+  }
+}
