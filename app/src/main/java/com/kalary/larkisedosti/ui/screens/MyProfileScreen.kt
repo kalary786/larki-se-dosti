@@ -73,6 +73,17 @@ fun MyProfileScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(Space.s8), modifier = Modifier.padding(top = Space.s8)) {
             Chip(app.myGender.label)
             Chip("${app.myCountry.flag} ${app.myCountry.name}")
+            if (app.isVip) {
+                Text(
+                    "VIP",
+                    style = AppType.caption,
+                    color = colors.onPrimary,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(Radius.chip))
+                        .background(colors.primary)
+                        .padding(horizontal = Space.s12, vertical = Space.s8),
+                )
+            }
         }
         Text("Add up to 3 photos", style = AppType.title, color = colors.textPrimary, modifier = Modifier.padding(top = Space.s20, bottom = Space.s8))
         Row(horizontalArrangement = Arrangement.spacedBy(Space.s8)) {
