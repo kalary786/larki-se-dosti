@@ -31,6 +31,7 @@ fun PolicyPageScreen(
     val colors = LoungeTheme.colors
     val file = when (page) {
         "privacy" -> "privacy.html"
+        "terms" -> "terms.html"
         "support" -> "support.html"
         "delete" -> "delete-account.html"
         "safety" -> "child-safety.html"
@@ -38,6 +39,7 @@ fun PolicyPageScreen(
     }
     val title = when (page) {
         "privacy" -> "Privacy policy"
+        "terms" -> "Terms and conditions"
         "support" -> "Support"
         "delete" -> "Account deletion"
         "safety" -> "Child safety"

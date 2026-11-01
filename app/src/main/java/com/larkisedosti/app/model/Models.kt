@@ -18,10 +18,21 @@ enum class Gender(val label: String) {
 enum class PhotoStatus {
     Pending,
     Approved,
+    ;
+
+    val wire: String
+        get() = name.lowercase()
+
+    companion object {
+        fun fromWire(value: String?): PhotoStatus {
+            return if (value.equals("approved", ignoreCase = true)) Approved else Pending
+        }
+    }
 }
 
 data class ProfilePhoto(
-    val uri: String,
+    val id: String,
+    val url: String,
     val status: PhotoStatus = PhotoStatus.Pending,
 )
 
@@ -55,6 +66,7 @@ data class Person(
     val color: Color,
     val panels: Int,
     val photoUrl: String? = null,
+    val photoUrls: List<String> = emptyList(),
 )
 
 data class ChatMessage(

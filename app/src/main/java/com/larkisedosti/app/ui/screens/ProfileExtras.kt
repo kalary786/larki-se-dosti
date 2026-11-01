@@ -9,7 +9,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -68,7 +73,7 @@ fun EditProfileScreen(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .navigationBarsPadding()
+            .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
             .verticalScroll(rememberScrollState())
             .padding(LoungeSpace.s20),
     ) {
@@ -78,7 +83,21 @@ fun EditProfileScreen(
             Text(text = "Edit profile", color = colors.textPrimary, style = LoungeType.h2)
         }
         Spacer(Modifier.height(LoungeSpace.s20))
-        LoungeTextField(value = name, onValueChange = { name = it }, placeholder = "Name")
+        LoungeTextField(
+            value = name,
+            onValueChange = { name = it },
+            placeholder = "Name",
+            onIme = {
+                if (saving || name.trim().length < 2) return@LoungeTextField
+                saving = true
+                saveError = null
+                scope.launch {
+                    saveError = store.updateProfile(name.trim(), gender, country)
+                    saving = false
+                    if (saveError == null) onBack()
+                }
+            },
+        )
         Spacer(Modifier.height(LoungeSpace.s16))
         Text(text = "Date of birth", color = colors.textSecondary, style = LoungeType.caption)
         Spacer(Modifier.height(6.dp))
@@ -275,9 +294,10 @@ fun PrivacyScreen(
                 showDivider = true,
             )
             SettingsRow(AppIcons.Flag, "Privacy policy", onClick = { onOpenPage("privacy") }, showDivider = true)
+            SettingsRow(AppIcons.Flag, "Terms and conditions", onClick = { onOpenPage("terms") }, showDivider = true)
             SettingsRow(AppIcons.Ban, "Child safety standards", onClick = { onOpenPage("safety") }, showDivider = true)
             SettingsRow(AppIcons.Flag, "Account deletion page", onClick = { onOpenPage("delete") }, showDivider = true)
-            SettingsRow(AppIcons.Trash, "Delete account", subtitle = "Removes this device profile", onClick = { delete = true }, showDivider = true)
+            SettingsRow(AppIcons.Trash, "Delete account", subtitle = "Deletes the account and the photos on this phone", onClick = { delete = true }, showDivider = true)
             SettingsRow(AppIcons.Close, "Log out", subtitle = "Clears this device and starts again", onClick = { logout = true })
         }
         accountError?.let { message ->
@@ -377,8 +397,9 @@ fun HelpScreen(
                 .border(1.dp, colors.border, LoungeShape.card),
         ) {
             SettingsRow(AppIcons.Flag, "Safety tips", onClick = { topic = "safety" }, showDivider = true)
-            SettingsRow(AppIcons.Message, "Support", subtitle = "hello@larkisedosti.app", onClick = { onOpenPage("support") }, showDivider = true)
+            SettingsRow(AppIcons.Message, "Support", subtitle = "admin@dostiapp.online", onClick = { onOpenPage("support") }, showDivider = true)
             SettingsRow(AppIcons.Flag, "Privacy policy", onClick = { onOpenPage("privacy") }, showDivider = true)
+            SettingsRow(AppIcons.Flag, "Terms and conditions", onClick = { onOpenPage("terms") }, showDivider = true)
             SettingsRow(AppIcons.Ban, "Child safety standards", onClick = { onOpenPage("safety") })
         }
     }

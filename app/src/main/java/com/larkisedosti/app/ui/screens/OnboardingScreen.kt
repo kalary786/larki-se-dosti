@@ -16,7 +16,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -53,7 +57,6 @@ import com.larkisedosti.app.ui.components.BottomSheet
 import com.larkisedosti.app.ui.components.GhostButton
 import com.larkisedosti.app.ui.components.IconCircleButton
 import com.larkisedosti.app.ui.components.LoungeTextField
-import com.larkisedosti.app.ui.components.ModalDialog
 import com.larkisedosti.app.ui.components.PrimaryButton
 import com.larkisedosti.app.ui.components.SecondaryButton
 import com.larkisedosti.app.ui.icons.AppIcons
@@ -68,6 +71,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun OnboardingScreen(
     store: AppStore,
+    onOpenPage: (String) -> Unit = {},
     onFinished: () -> Unit,
 ) {
     val colors = LoungeTheme.colors
@@ -88,7 +92,6 @@ fun OnboardingScreen(
     var adultConfirmed by remember { mutableStateOf(false) }
     var countryOpen by remember { mutableStateOf(false) }
     var countryQuery by remember { mutableStateOf("") }
-    var policy by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
     var googleMessage by remember { mutableStateOf<String?>(null) }
@@ -122,7 +125,7 @@ fun OnboardingScreen(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .navigationBarsPadding()
+            .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
             .padding(horizontal = LoungeSpace.s20, vertical = LoungeSpace.s16),
     ) {
         Text(
@@ -174,13 +177,18 @@ fun OnboardingScreen(
                     },
                     onConfirmed = { adultConfirmed = it },
                 )
-                1 -> NameStep(name, onName = { name = it })
+                1 -> NameStep(
+                    name = name,
+                    onName = { name = it },
+                    onDone = { if (name.trim().length >= 2) step = 2 },
+                )
                 2 -> UsernameStep(
                     username = username,
                     status = usernameStatus,
                     onUsername = { typed ->
                         username = typed.lowercase().filter { it.isLetterOrDigit() || it == '_' }.take(20)
                     },
+                    onDone = { if (usernameStatus == UsernameStatus.Available) step = 3 },
                 )
                 3 -> GenderStep(gender, onPick = { gender = it })
                 4 -> CountryStep(country, onOpen = { countryOpen = true })
@@ -190,8 +198,8 @@ fun OnboardingScreen(
                 else -> TermsStep(
                     checked = terms,
                     onChecked = { terms = it },
-                    onOpenTerms = { policy = "terms" },
-                    onOpenPrivacy = { policy = "privacy" },
+                    onOpenTerms = { onOpenPage("terms") },
+                    onOpenPrivacy = { onOpenPage("privacy") },
                 )
             }
             Spacer(Modifier.weight(1f))
@@ -332,19 +340,6 @@ fun OnboardingScreen(
         }
     }
 
-    ModalDialog(
-        visible = policy != null,
-        title = if (policy == "privacy") "Privacy" else "Terms",
-        body = if (policy == "privacy") {
-            "We keep your profile on this device. Photos are reviewed before other people can see them. You can block someone or delete the account at any time."
-        } else {
-            "Be kind, be 18 or older, and don't send anything you wouldn't say in person. We can remove accounts that harass, scam, or pretend to be someone else."
-        },
-        confirmLabel = "Close",
-        dismissLabel = "Back",
-        onConfirm = { policy = null },
-        onDismiss = { policy = null },
-    )
 }
 
 @Composable
@@ -488,7 +483,7 @@ private fun ageYears(day: Int, month: Int, year: Int): Int {
 }
 
 @Composable
-private fun NameStep(name: String, onName: (String) -> Unit) {
+private fun NameStep(name: String, onName: (String) -> Unit, onDone: () -> Unit) {
     val colors = LoungeTheme.colors
     Text(text = "What should we call you?", color = colors.textPrimary, style = LoungeType.h1)
     Spacer(Modifier.height(LoungeSpace.s8))
@@ -498,7 +493,12 @@ private fun NameStep(name: String, onName: (String) -> Unit) {
         style = LoungeType.body,
     )
     Spacer(Modifier.height(LoungeSpace.s24))
-    LoungeTextField(value = name, onValueChange = onName, placeholder = "Display name")
+    LoungeTextField(
+        value = name,
+        onValueChange = onName,
+        placeholder = "Display name",
+        onIme = onDone,
+    )
 }
 
 @Composable
@@ -506,6 +506,7 @@ private fun UsernameStep(
     username: String,
     status: UsernameStatus,
     onUsername: (String) -> Unit,
+    onDone: () -> Unit,
 ) {
     val colors = LoungeTheme.colors
     Text(text = "Choose a username", color = colors.textPrimary, style = LoungeType.h1)
@@ -521,6 +522,7 @@ private fun UsernameStep(
         onValueChange = onUsername,
         placeholder = "username",
         capitalization = KeyboardCapitalization.None,
+        onIme = onDone,
     )
     Spacer(Modifier.height(LoungeSpace.s8))
     val (label, color) = when (status) {

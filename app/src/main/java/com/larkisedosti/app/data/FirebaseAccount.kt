@@ -3,6 +3,8 @@ package com.larkisedosti.app.data
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import java.io.File
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
@@ -16,12 +18,17 @@ import com.google.firebase.auth.FirebaseAuthRecentLoginRequiredException
 import com.google.firebase.auth.FirebaseAuthUserCollisionException
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.storage.StorageException
+import com.google.firebase.storage.StorageMetadata
 import com.larkisedosti.app.model.Countries
 import com.larkisedosti.app.model.Country
 import com.larkisedosti.app.model.Gender
 import com.larkisedosti.app.model.PhotoStatus
 import com.larkisedosti.app.model.ProfilePhoto
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 
 data class UserProfile(
     val uid: String,
@@ -69,6 +76,8 @@ class FirebaseAccount(context: Context) {
         get() = FirebaseAuth.getInstance()
     private val db: FirebaseFirestore
         get() = FirebaseFirestore.getInstance()
+    private val storage: FirebaseStorage
+        get() = FirebaseStorage.getInstance()
 
     suspend fun enter(): AccountGate {
         if (!ready()) {
@@ -104,7 +113,7 @@ class FirebaseAccount(context: Context) {
         val uid = user.uid
         val cleanName = username.trim().lowercase()
         if (!cleanName.matches(usernamePattern)) error("Username doesn't match the rules.")
-        keepPhoto(photos.firstOrNull()?.uri)
+        keepPhoto(photos.firstOrNull()?.url)
         val now = System.currentTimeMillis()
         val linked = user.isGoogleLinked()
         val userRef = db.collection(USERS).document(uid)
@@ -168,21 +177,100 @@ class FirebaseAccount(context: Context) {
         displayName: String,
         gender: Gender,
         country: Country,
-        photos: List<ProfilePhoto?>,
     ) {
         val uid = auth.currentUser?.uid ?: return
-        photos.forEach { keepPhoto(it?.uri) }
         db.collection(USERS).document(uid).update(
             mapOf(
                 "displayName" to displayName.trim(),
                 "gender" to gender.name,
                 "country" to country.name,
-                "photos" to encodePhotos(photos),
             ),
         ).await()
     }
 
+    fun saveLocalPhoto(uid: String, index: Int, source: Uri): ProfilePhoto {
+        if (index !in 0..2) error("Photo slot is out of range.")
+        val bytes = PhotoFiles.jpeg(appContext, source)
+        val dir = File(appContext.filesDir, "profile-photos/$uid").apply { mkdirs() }
+        val file = File(dir, "$index.jpg")
+        file.writeBytes(bytes)
+        val stored = Uri.fromFile(file).toString()
+        val slots = readLocalSlots(uid).toMutableList()
+        slots[index] = stored
+        writeLocalSlots(uid, slots)
+        return ProfilePhoto("local-$index", stored, PhotoStatus.Pending)
+    }
+
+    fun localPhotos(uid: String): List<ProfilePhoto?> {
+        return readLocalSlots(uid).mapIndexed { index, stored ->
+            val path = stored?.let { Uri.parse(it).path } ?: return@mapIndexed null
+            if (!File(path).exists()) null else ProfilePhoto("local-$index", stored, PhotoStatus.Pending)
+        }
+    }
+
+    fun removeLocalPhoto(uid: String, index: Int) {
+        if (index !in 0..2) return
+        val slots = readLocalSlots(uid).toMutableList()
+        slots[index]?.let { stored -> Uri.parse(stored).path?.let { File(it).delete() } }
+        slots[index] = null
+        writeLocalSlots(uid, slots)
+    }
+
+    fun deleteLocalPhotos(uid: String) {
+        if (uid.isBlank()) return
+        File(appContext.filesDir, "profile-photos/$uid").deleteRecursively()
+        photoPrefs().edit().remove(uid).apply()
+    }
+
+    suspend fun savePhotos(photos: List<ProfilePhoto?>) {
+        val uid = auth.currentUser?.uid ?: error("Sign in first.")
+        db.collection(USERS).document(uid).update("photos", encodePhotos(photos)).await()
+    }
+
+    suspend fun uploadJpeg(photoId: String, source: Uri, onProgress: (Float) -> Unit): String {
+        if (!ready()) error("Firebase isn't ready.")
+        val uid = auth.currentUser?.uid ?: error("Sign in first.")
+        val bytes = withContext(Dispatchers.IO) { PhotoFiles.jpeg(appContext, source) }
+        onProgress(0.02f)
+        val ref = storage.reference.child("users/$uid/photos/$photoId.jpg")
+        val metadata = StorageMetadata.Builder().setContentType("image/jpeg").build()
+        val task = ref.putBytes(bytes, metadata)
+        task.addOnProgressListener { snapshot ->
+            val total = snapshot.totalByteCount.coerceAtLeast(1L)
+            onProgress((snapshot.bytesTransferred.toFloat() / total.toFloat()).coerceIn(0.02f, 1f))
+        }
+        task.await()
+        return ref.downloadUrl.await().toString()
+    }
+
+    suspend fun deleteJpeg(photoId: String) {
+        if (!ready()) return
+        val uid = auth.currentUser?.uid ?: return
+        try {
+            storage.reference.child("users/$uid/photos/$photoId.jpg").delete().await()
+        } catch (error: Exception) {
+            var current: Throwable? = error
+            var storageError: StorageException? = null
+            while (current != null) {
+                if (current is StorageException) storageError = current
+                current = current.cause
+            }
+            if (storageError == null || storageError.errorCode != StorageException.ERROR_OBJECT_NOT_FOUND) throw error
+        }
+    }
+
+    suspend fun loadDiscoverProfiles(exceptUid: String): List<UserProfile> {
+        if (!ready()) error("Firebase isn't ready.")
+        val snapshot = db.collection(USERS).get().await()
+        return snapshot.documents.mapNotNull { document ->
+            if (document.id == exceptUid) return@mapNotNull null
+            val data = document.data ?: return@mapNotNull null
+            runCatching { parseProfile(document.id, data) }.getOrNull()
+        }
+    }
+
     fun setOnline(online: Boolean) {
+        if (!ready()) return
         val uid = auth.currentUser?.uid ?: return
         db.collection(USERS).document(uid).update(
             mapOf(
@@ -364,28 +452,37 @@ class FirebaseAccount(context: Context) {
         return providerData.any { it.providerId == GoogleAuthProvider.PROVIDER_ID }
     }
 
+    private fun photoPrefs() = appContext.getSharedPreferences("larki_local_photos", Context.MODE_PRIVATE)
+
+    private fun readLocalSlots(uid: String): List<String?> {
+        val raw = photoPrefs().getString(uid, null) ?: return listOf(null, null, null)
+        val parts = raw.split("\n")
+        return List(3) { index -> parts.getOrNull(index)?.takeIf { it.isNotBlank() } }
+    }
+
+    private fun writeLocalSlots(uid: String, slots: List<String?>) {
+        photoPrefs().edit().putString(uid, List(3) { slots.getOrNull(it).orEmpty() }.joinToString("\n")).apply()
+    }
+
     private fun encodePhotos(photos: List<ProfilePhoto?>): List<Map<String, String>> {
         return photos.mapNotNull { photo ->
-            photo?.takeIf { it.uri.isNotBlank() }?.let {
-                mapOf("uri" to it.uri, "status" to it.status.name)
+            photo?.takeIf { it.id.isNotBlank() && it.url.startsWith("https://") }?.let {
+                mapOf(
+                    "id" to it.id,
+                    "url" to it.url,
+                    "status" to it.status.wire,
+                )
             }
         }
     }
 
     private fun decodePhotos(raw: Any?): List<ProfilePhoto?> {
         val parsed = (raw as? List<*>)?.mapNotNull { item ->
-            when (item) {
-                is String -> item.takeIf { it.isNotBlank() }?.let { ProfilePhoto(it, PhotoStatus.Pending) }
-                is Map<*, *> -> {
-                    val uri = item["uri"] as? String ?: return@mapNotNull null
-                    if (uri.isBlank()) return@mapNotNull null
-                    val status = runCatching {
-                        PhotoStatus.valueOf(item["status"] as? String ?: PhotoStatus.Pending.name)
-                    }.getOrDefault(PhotoStatus.Pending)
-                    ProfilePhoto(uri, status)
-                }
-                else -> null
-            }
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val id = map["id"] as? String ?: return@mapNotNull null
+            val url = map["url"] as? String ?: return@mapNotNull null
+            if (id.isBlank() || !url.startsWith("https://")) return@mapNotNull null
+            ProfilePhoto(id, url, PhotoStatus.fromWire(map["status"] as? String))
         }.orEmpty()
         return List(3) { index -> parsed.getOrNull(index) }
     }

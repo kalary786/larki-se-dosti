@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "832335959203",
+    "project_id": "larki-se-dosti",
+    "storage_bucket": "larki-se-dosti.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:832335959203:android:9033e5d1426f38b0561b16",
+        "android_client_info": {
+          "package_name": "com.larkisedosti.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "832335959203-a74gasdp4t1aaikdbbbtqq9p1jfa44gh.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.larkisedosti.app",
+            "certificate_hash": "5bd3d0255195fd403f7a246534daf7b3671d851c"
+          }
+        },
+        {
+          "client_id": "832335959203-p1nfog64sj8o2qvlf0dip0ohctnhlqhc.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAb8rvU72ZEiOyoPY23M6_AkOnFE-7bVKE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "832335959203-p1nfog64sj8o2qvlf0dip0ohctnhlqhc.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

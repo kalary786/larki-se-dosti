@@ -1,6 +1,7 @@
 package com.larkisedosti.app.model
 
 import android.app.Activity
+import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -17,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Calendar
 
 class AppStore(
@@ -35,6 +37,8 @@ class AppStore(
     var gender by mutableStateOf(Gender.Female)
     var country by mutableStateOf(Countries.first())
     val photos = mutableStateListOf<ProfilePhoto?>(null, null, null)
+    val photoProgress = mutableStateListOf<Float?>(null, null, null)
+    var photoMessage by mutableStateOf<String?>(null)
     val reports = mutableStateListOf<UserReport>()
     var coins by mutableIntStateOf(StartingCoins)
     var giftsSent by mutableIntStateOf(0)
@@ -48,11 +52,12 @@ class AppStore(
     val requestIds = mutableStateListOf<String>()
     val blockedIds = mutableStateListOf<String>()
     val directory = mutableStateListOf<Person>()
+    val discoverPeople = mutableStateListOf<Person>()
     val conversations = mutableStateListOf<Conversation>()
     val notices = mutableStateListOf<Notice>()
 
-    private var page = 0
     private var sequence = 0
+    var discoverError by mutableStateOf<String?>(null)
 
     val unreadChats: Int get() = conversations.sumOf { it.unread }
     val unreadNotices: Int get() = notices.count { !it.read }
@@ -79,7 +84,7 @@ class AppStore(
         notices.add(Notice("n4", "Incoming call", "Hania is calling.", "12m", "call", "p2"))
     }
 
-    fun person(id: String): Person? = directory.find { it.id == id }
+    fun person(id: String): Person? = discoverPeople.find { it.id == id } ?: directory.find { it.id == id }
 
     fun toggleFavorite(id: String) {
         if (id in favorites) favorites.remove(id) else favorites.add(id)
@@ -113,16 +118,38 @@ class AppStore(
         reports.add(UserReport(personId, reason, note))
     }
 
-    fun setPhoto(index: Int, uri: String?) {
-        if (index !in photos.indices) return
-        photos[index] = uri?.takeIf { it.isNotBlank() }?.let { ProfilePhoto(it, PhotoStatus.Pending) }
-        if (!signedIn) return
+    fun uploadPhoto(index: Int, source: Uri) {
+        if (index !in photos.indices || userId.isBlank() || photoProgress[index] != null) return
+        photoProgress[index] = 0.15f
         writes.launch {
             try {
-                account.updateProfile(name, gender, country, photos.toList())
+                photoMessage = null
+                val saved = withContext(Dispatchers.IO) { account.saveLocalPhoto(userId, index, source) }
+                photos[index] = saved
             } catch (_: Exception) {
-                // The photo stays on screen. The next successful save writes it.
+                photoMessage = "Couldn't save that photo on this phone."
+            } finally {
+                photoProgress[index] = null
             }
+        }
+    }
+
+    fun deletePhoto(index: Int) {
+        if (photos.getOrNull(index) == null || photoProgress[index] != null || userId.isBlank()) return
+        account.removeLocalPhoto(userId, index)
+        photos[index] = null
+        photoMessage = null
+    }
+
+    suspend fun refreshDiscover() {
+        if (!signedIn || userId.isBlank()) return
+        try {
+            val people = account.loadDiscoverProfiles(userId).map { profile -> profile.toDiscoverPerson() }
+            discoverPeople.clear()
+            discoverPeople.addAll(people)
+            discoverError = null
+        } catch (_: Exception) {
+            discoverError = "Couldn't load people. Check your connection and pull to try again."
         }
     }
 
@@ -139,7 +166,8 @@ class AppStore(
         createdAt = profile.createdAt
         coins = profile.coins
         level = profile.level
-        repeat(3) { index -> photos[index] = profile.photos.getOrNull(index) }
+        val local = account.localPhotos(profile.uid)
+        repeat(3) { index -> photos[index] = local.getOrNull(index) }
         signedIn = profile.onboardingCompleted
     }
 
@@ -158,13 +186,18 @@ class AppStore(
                 dateOfBirth = dateOfBirth,
                 gender = gender,
                 country = country,
-                photos = listOf(
-                    photo?.takeIf { it.isNotBlank() }?.let { ProfilePhoto(it, PhotoStatus.Pending) },
-                    null,
-                    null,
-                ),
+                photos = listOf(null, null, null),
             )
             restore(profile)
+            if (!photo.isNullOrBlank()) {
+                try {
+                    photos[0] = withContext(Dispatchers.IO) {
+                        account.saveLocalPhoto(profile.uid, 0, Uri.parse(photo))
+                    }
+                } catch (_: Exception) {
+                    photoMessage = "Couldn't save that photo on this phone."
+                }
+            }
             null
         } catch (_: UsernameTakenException) {
             "That username was just taken. Try another."
@@ -176,7 +209,7 @@ class AppStore(
     suspend fun updateProfile(name: String, gender: Gender, country: Country): String? {
         val clean = name.trim().ifBlank { this.name }
         return try {
-            account.updateProfile(clean, gender, country, photos.toList())
+            account.updateProfile(clean, gender, country)
             this.name = clean
             this.gender = gender
             this.country = country
@@ -208,7 +241,7 @@ class AppStore(
 
     fun photoVisibleToOthers(index: Int): String? {
         val photo = photos.getOrNull(index) ?: return null
-        return photo.uri.takeIf { photo.status == PhotoStatus.Approved }
+        return photo.url.takeIf { photo.status == PhotoStatus.Approved }
     }
 
     fun openConversation(personId: String): Conversation {
@@ -259,37 +292,8 @@ class AppStore(
         coins += amount
     }
 
-    fun appendPage() {
-        if (directory.size >= 48) return
-        page += 1
-        val extraNames = listOf("Iqra", "Hadi", "Mariam", "Danish", "Eman", "Rayan")
-        extraNames.forEachIndexed { index, label ->
-            val country = Countries[(page + index) % Countries.size]
-            val female = index % 2 == 0
-            directory.add(
-                Person(
-                    id = "g$page$index",
-                    name = label,
-                    age = 21 + ((page + index) % 9),
-                    gender = if (female) Gender.Female else Gender.Male,
-                    city = country.city,
-                    region = country.region,
-                    countryName = country.name,
-                    countryFlag = country.flag,
-                    online = (page + index) % 3 != 0,
-                    bio = "Here for a real conversation, not a performance.",
-                    verified = index == 0,
-                    ring = index % 4,
-                    bearing = (40f + index * 55f + page * 15f) % 360f,
-                    color = portraitColors[(page + index) % portraitColors.size],
-                    panels = 1 + (index % 3),
-                    photoUrl = "https://i.pravatar.cc/400?img=${(20 + page * 6 + index) % 70 + 1}",
-                ),
-            )
-        }
-    }
-
     suspend fun deleteAccount() {
+        account.deleteLocalPhotos(userId)
         account.deleteAccount()
         clearLocal()
     }
@@ -316,6 +320,12 @@ class AppStore(
         photos[0] = null
         photos[1] = null
         photos[2] = null
+        photoProgress[0] = null
+        photoProgress[1] = null
+        photoProgress[2] = null
+        photoMessage = null
+        discoverPeople.clear()
+        discoverError = null
         reports.clear()
         conversations.clear()
         notices.clear()
@@ -350,6 +360,32 @@ class AppStore(
         const val CallCost = 10
         const val StartingCoins = FirebaseAccount.STARTING_COINS
     }
+}
+
+private fun UserProfile.toDiscoverPerson(): Person {
+    val approved = photos.mapNotNull { photo ->
+        photo?.takeIf { it.status == PhotoStatus.Approved }?.url
+    }
+    val bucket = uid.hashCode().and(Int.MAX_VALUE)
+    return Person(
+        id = uid,
+        name = displayName,
+        age = ageFromDate(dateOfBirth),
+        gender = gender,
+        city = country.city,
+        region = country.region,
+        countryName = country.name,
+        countryFlag = country.flag,
+        online = isOnline,
+        bio = "",
+        verified = false,
+        ring = bucket % 4,
+        bearing = (bucket % 360).toFloat(),
+        color = portraitColors[bucket % portraitColors.size],
+        panels = approved.size.coerceAtLeast(1),
+        photoUrl = approved.firstOrNull(),
+        photoUrls = approved,
+    )
 }
 
 private val portraitColors = listOf(

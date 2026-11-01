@@ -156,7 +156,7 @@ fun LarkiApp() {
             message = splashError,
             onRetry = { splashAttempt += 1 },
         )
-        route == "onboard" -> OnboardingScreen(store) {
+        route == "onboard" -> OnboardingScreen(store, onOpenPage = { push("page:$it") }) {
             tab = MainTab.Discover
             home()
         }

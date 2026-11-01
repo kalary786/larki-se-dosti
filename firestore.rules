@@ -30,6 +30,45 @@ service cloud.firestore {
       ];
     }
 
+    function isPendingPhoto(photo) {
+      return photo.keys().hasOnly(['id', 'url', 'status'])
+        && photo.id is string
+        && photo.id.size() > 0
+        && photo.id.size() <= 64
+        && photo.url is string
+        && photo.url.size() > 12
+        && photo.url.size() < 2048
+        && photo.status == 'pending';
+    }
+
+    function matchesExistingPhoto(photo) {
+      return photo == resource.data.photos[0]
+        || (resource.data.photos.size() > 1 && photo == resource.data.photos[1])
+        || (resource.data.photos.size() > 2 && photo == resource.data.photos[2]);
+    }
+
+    function photoAllowed(photo) {
+      return isPendingPhoto(photo) || matchesExistingPhoto(photo);
+    }
+
+    function newPhotoList(list) {
+      return list is list
+        && list.size() <= 3
+        && (list.size() < 1 || isPendingPhoto(list[0]))
+        && (list.size() < 2 || isPendingPhoto(list[1]))
+        && (list.size() < 3 || isPendingPhoto(list[2]));
+    }
+
+    function photoUpdateOk() {
+      return request.resource.data.photos == resource.data.photos
+        || (
+          request.resource.data.photos.size() <= 3
+          && (request.resource.data.photos.size() < 1 || photoAllowed(request.resource.data.photos[0]))
+          && (request.resource.data.photos.size() < 2 || photoAllowed(request.resource.data.photos[1]))
+          && (request.resource.data.photos.size() < 3 || photoAllowed(request.resource.data.photos[2]))
+        );
+    }
+
     function validProfile(data) {
       return data.keys().hasOnly(profileKeys())
         && data.uid is string
@@ -54,6 +93,7 @@ service cloud.firestore {
 
       allow create: if isOwner(uid)
         && validProfile(request.resource.data)
+        && newPhotoList(request.resource.data.photos)
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.coins == 50
         && request.resource.data.level == 1
@@ -61,6 +101,7 @@ service cloud.firestore {
 
       allow update: if isOwner(uid)
         && validProfile(request.resource.data)
+        && photoUpdateOk()
         && request.resource.data.uid == resource.data.uid
         && request.resource.data.shortId == resource.data.shortId
         && request.resource.data.coins == resource.data.coins

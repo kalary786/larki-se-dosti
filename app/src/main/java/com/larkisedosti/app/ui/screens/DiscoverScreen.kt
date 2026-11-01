@@ -54,6 +54,7 @@ import com.larkisedosti.app.model.Person
 import com.larkisedosti.app.ui.components.AdSlot
 import com.larkisedosti.app.ui.components.BottomSheet
 import com.larkisedosti.app.ui.components.DiscoverSkeletonCard
+import com.larkisedosti.app.ui.components.EmptyState
 import com.larkisedosti.app.ui.components.FilterChip
 import com.larkisedosti.app.ui.components.IconCircleButton
 import com.larkisedosti.app.ui.components.LoungeTextField
@@ -64,9 +65,6 @@ import com.larkisedosti.app.ui.theme.LoungeSpace
 import com.larkisedosti.app.ui.theme.LoungeTheme
 import com.larkisedosti.app.ui.theme.LoungeType
 import com.larkisedosti.app.ui.shell.LocalShellInset
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 
 private sealed interface FeedItem {
     data class Profile(val person: Person) : FeedItem
@@ -88,10 +86,9 @@ fun DiscoverScreen(
     var countryQuery by remember { mutableStateOf("") }
     var ready by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
-    var paging by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
 
-    val people = store.directory.filter { person ->
+    val people = store.discoverPeople.filter { person ->
         person.id !in store.blockedIds && when (filter) {
             "Girls" -> person.gender == Gender.Female
             "Boys" -> person.gender == Gender.Male
@@ -101,34 +98,16 @@ fun DiscoverScreen(
     }
     val feed = buildFeed(people)
 
-    LaunchedEffect(Unit) {
-        delay(700)
+    LaunchedEffect(store.userId) {
+        ready = false
+        store.refreshDiscover()
         ready = true
     }
     LaunchedEffect(refreshing) {
-        if (refreshing) {
-            delay(700)
-            refreshing = false
-            ready = true
-        }
-    }
-    LaunchedEffect(ready, feed.size) {
-        androidx.compose.runtime.snapshotFlow {
-            gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-        }
-            .map { it }
-            .distinctUntilChanged()
-            .collect { last ->
-                if (ready && !paging && last >= feed.size - 4 && store.directory.size < 48) {
-                    paging = true
-                }
-            }
-    }
-    LaunchedEffect(paging) {
-        if (!paging) return@LaunchedEffect
-        delay(400)
-        store.appendPage()
-        paging = false
+        if (!refreshing) return@LaunchedEffect
+        store.refreshDiscover()
+        refreshing = false
+        ready = true
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -182,6 +161,16 @@ fun DiscoverScreen(
                         DiscoverSkeletonCard(pulse = pulse)
                     }
                 }
+            } else if (people.isEmpty()) {
+                EmptyState(
+                    title = if (store.discoverError != null) "Couldn't load people" else "No one here yet",
+                    message = store.discoverError
+                        ?: "When other people finish their profiles, they show up here.",
+                    icon = AppIcons.Users,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(bottom = LocalShellInset.current),
+                )
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),

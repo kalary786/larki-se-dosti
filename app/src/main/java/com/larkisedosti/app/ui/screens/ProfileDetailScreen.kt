@@ -70,7 +70,8 @@ fun ProfileDetailScreen(
     var pendingGift by remember { mutableStateOf<GiftKind?>(null) }
     var needCoins by rememberSaveable { mutableStateOf(false) }
     var burst by rememberSaveable { mutableStateOf<String?>(null) }
-    val panels = person.panels.coerceIn(1, 3)
+    val gallery = if (person.photoUrls.isNotEmpty()) person.photoUrls else listOfNotNull(person.photoUrl)
+    val panels = if (person.photoUrls.isNotEmpty()) gallery.size else person.panels.coerceIn(1, 3)
     val pager = rememberPagerState { panels }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -99,9 +100,10 @@ fun ProfileDetailScreen(
                             color = Color.White,
                             style = LoungeType.h1,
                         )
-                        person.photoUrl?.let { url ->
+                        val url = gallery.getOrNull(page) ?: person.photoUrl
+                        url?.let {
                             AsyncImage(
-                                model = url,
+                                model = it,
                                 contentDescription = person.name,
                                 modifier = Modifier.fillMaxSize(),
                                 contentScale = ContentScale.Crop,
@@ -199,8 +201,10 @@ fun ProfileDetailScreen(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(LoungeSpace.s12))
-                Text(text = person.bio, color = colors.textPrimary, style = LoungeType.body)
+                if (person.bio.isNotBlank()) {
+                    Spacer(Modifier.height(LoungeSpace.s12))
+                    Text(text = person.bio, color = colors.textPrimary, style = LoungeType.body)
+                }
                 Spacer(Modifier.height(LoungeSpace.s20))
                 ActionRow(
                     person = person,

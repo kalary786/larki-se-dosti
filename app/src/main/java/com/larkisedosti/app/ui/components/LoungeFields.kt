@@ -23,6 +23,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
@@ -46,6 +48,14 @@ fun LoungeTextField(
     onIme: () -> Unit = {},
 ) {
     val colors = LoungeTheme.colors
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val resolvedIme = if (singleLine && imeAction == ImeAction.Default) ImeAction.Done else imeAction
+    val submit = {
+        onIme()
+        focusManager.clearFocus()
+        keyboard?.hide()
+    }
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
@@ -54,12 +64,14 @@ fun LoungeTextField(
         singleLine = singleLine,
         keyboardOptions = KeyboardOptions(
             capitalization = capitalization,
-            imeAction = imeAction,
+            imeAction = resolvedIme,
         ),
         keyboardActions = KeyboardActions(
-            onSearch = { onIme() },
-            onSend = { onIme() },
-            onDone = { onIme() },
+            onDone = { submit() },
+            onGo = { submit() },
+            onNext = { submit() },
+            onSearch = { submit() },
+            onSend = { submit() },
         ),
         modifier = modifier
             .fillMaxWidth()
