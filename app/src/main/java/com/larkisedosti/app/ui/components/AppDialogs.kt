@@ -57,6 +57,7 @@ fun NotEnoughCoinsModal(
     onBuyCoins: () -> Unit,
     onFreeTry: () -> Unit,
     onDismiss: () -> Unit,
+    allowFreeTry: Boolean = true,
 ) {
     var watching by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(visible) {
@@ -108,7 +109,7 @@ fun NotEnoughCoinsModal(
             )
             Spacer(Modifier.height(LoungeSpace.s8))
             Text(
-                text = "Buy coins, or watch a video for one free try",
+                text = if (allowFreeTry) "Buy coins, or watch a video for one free try" else "Buy coins to continue.",
                 color = colors.textSecondary,
                 style = LoungeType.body,
                 textAlign = TextAlign.Center,
@@ -130,8 +131,10 @@ fun NotEnoughCoinsModal(
             )
             Spacer(Modifier.height(LoungeSpace.s20))
             PrimaryButton(text = "Buy Coins", onClick = onBuyCoins, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(LoungeSpace.s8))
-            SecondaryButton(text = freeLabel, onClick = { watching = true }, modifier = Modifier.fillMaxWidth())
+            if (allowFreeTry) {
+                Spacer(Modifier.height(LoungeSpace.s8))
+                SecondaryButton(text = freeLabel, onClick = { watching = true }, modifier = Modifier.fillMaxWidth())
+            }
             Spacer(Modifier.height(LoungeSpace.s8))
             GhostButton(text = "Not now", onClick = onDismiss, modifier = Modifier.fillMaxWidth())
         }

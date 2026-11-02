@@ -2,7 +2,6 @@ package com.larkisedosti.app.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,6 +19,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -49,6 +50,7 @@ private val packs = listOf(
 fun CoinStoreScreen(
     store: AppStore,
     onBack: () -> Unit,
+    onHistory: () -> Unit,
 ) {
     val colors = LoungeTheme.colors
     var watch by rememberSaveable { mutableStateOf(false) }
@@ -57,6 +59,7 @@ fun CoinStoreScreen(
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
             .padding(LoungeSpace.s20),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -67,6 +70,25 @@ fun CoinStoreScreen(
                 Text(text = "Balance ${store.coins}", color = colors.coin, style = LoungeType.body)
             }
         }
+        if (store.messageAllowanceKnown) {
+            Spacer(Modifier.height(LoungeSpace.s12))
+            Text(
+                text = "Free messages used: ${store.freeMessagesUsed}",
+                color = colors.textPrimary,
+                style = LoungeType.body,
+            )
+            Text(
+                text = "Free messages left: ${store.freeMessagesLeft}",
+                color = colors.textSecondary,
+                style = LoungeType.body,
+            )
+        }
+        Spacer(Modifier.height(LoungeSpace.s12))
+        Text(
+            text = "Your balance updates from the server. Buying coins is not available in this version.",
+            color = colors.textSecondary,
+            style = LoungeType.body,
+        )
         Spacer(Modifier.height(LoungeSpace.s20))
         packs.forEach { pack ->
             Row(
@@ -76,7 +98,6 @@ fun CoinStoreScreen(
                     .clip(LoungeShape.card)
                     .background(colors.surface)
                     .border(1.dp, if (pack.best) colors.primary else colors.border, LoungeShape.card)
-                    .clickable { store.grantCoins(pack.coins) }
                     .padding(LoungeSpace.s16),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -101,6 +122,12 @@ fun CoinStoreScreen(
         }
         Spacer(Modifier.height(LoungeSpace.s8))
         PrimaryButton(
+            text = "Coin history",
+            onClick = onHistory,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(LoungeSpace.s8))
+        PrimaryButton(
             text = "Watch a video to earn free coins",
             onClick = { watch = true },
             modifier = Modifier.fillMaxWidth(),
@@ -109,13 +136,10 @@ fun CoinStoreScreen(
     ModalDialog(
         visible = watch,
         title = "Rewarded video",
-        body = "This is a placeholder for a rewarded ad. When it finishes, you get 10 coins.",
-        confirmLabel = "Collect 10",
+        body = "Video rewards are not connected yet, so this does not add coins.",
+        confirmLabel = "Close",
         dismissLabel = "Close",
-        onConfirm = {
-            store.grantCoins(10)
-            watch = false
-        },
+        onConfirm = { watch = false },
         onDismiss = { watch = false },
     )
 }

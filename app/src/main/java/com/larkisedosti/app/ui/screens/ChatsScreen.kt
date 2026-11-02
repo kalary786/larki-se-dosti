@@ -21,6 +21,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,6 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.larkisedosti.app.model.AppStore
 import com.larkisedosti.app.model.Conversation
+import com.larkisedosti.app.model.presenceLabel
 import com.larkisedosti.app.ui.components.Avatar
 import com.larkisedosti.app.ui.components.Badge
 import com.larkisedosti.app.ui.components.ChatSkeletonRow
@@ -64,7 +66,7 @@ fun ChatsScreen(
         }
     }
     val rows = store.conversations.mapNotNull { conversation ->
-        val person = store.person(conversation.personId) ?: return@mapNotNull null
+        val person = store.person(conversation.personId)?.let(store::live) ?: return@mapNotNull null
         if (person.id in store.blockedIds) return@mapNotNull null
         conversation to person
     }.filter { (conversation, person) ->
@@ -77,6 +79,12 @@ fun ChatsScreen(
             else -> true
         }
         matchesQuery && matchesFilter
+    }
+    DisposableEffect(Unit) {
+        onDispose { store.watchPresence("chats", emptyList()) }
+    }
+    LaunchedEffect(rows.map { it.second.id }) {
+        store.watchPresence("chats", rows.map { it.second.id })
     }
 
     Column(
@@ -143,7 +151,14 @@ fun ChatsScreen(
                     .border(1.dp, colors.border, LoungeShape.card),
             ) {
                 items(rows, key = { it.first.personId }) { (conversation, person) ->
-                    ChatRow(conversation, person.name, person.online, person.color, person.id in store.favorites) {
+                    ChatRow(
+                        conversation,
+                        person.name,
+                        person.online,
+                        presenceLabel(person.online, person.lastSeen),
+                        person.color,
+                        person.id in store.favorites,
+                    ) {
                         onOpenChat(person.id)
                     }
                     if (conversation != rows.last().first) {
@@ -160,6 +175,7 @@ private fun ChatRow(
     conversation: Conversation,
     name: String,
     online: Boolean,
+    status: String,
     color: androidx.compose.ui.graphics.Color,
     saved: Boolean,
     onClick: () -> Unit,
@@ -193,6 +209,12 @@ private fun ChatRow(
                 style = LoungeType.title,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = status,
+                color = if (online) colors.online else colors.textSecondary,
+                style = LoungeType.caption,
+                maxLines = 1,
             )
             Text(
                 text = preview,

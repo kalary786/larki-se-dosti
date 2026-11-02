@@ -21,6 +21,9 @@ service cloud.firestore {
         'country',
         'photos',
         'coins',
+        'giftsSentCount',
+        'giftsReceivedCount',
+        'freeMessagesUsed',
         'level',
         'isOnline',
         'lastSeen',
@@ -80,6 +83,9 @@ service cloud.firestore {
         && data.country is string
         && data.photos is list
         && data.coins is int
+        && (!('giftsSentCount' in data) || data.giftsSentCount is int)
+        && (!('giftsReceivedCount' in data) || data.giftsReceivedCount is int)
+        && (!('freeMessagesUsed' in data) || data.freeMessagesUsed is int)
         && data.level is int
         && data.isOnline is bool
         && data.lastSeen is int
@@ -95,7 +101,10 @@ service cloud.firestore {
         && validProfile(request.resource.data)
         && newPhotoList(request.resource.data.photos)
         && request.resource.data.uid == request.auth.uid
-        && request.resource.data.coins == 50
+        && request.resource.data.coins == 0
+        && request.resource.data.giftsSentCount == 0
+        && request.resource.data.giftsReceivedCount == 0
+        && request.resource.data.freeMessagesUsed == 0
         && request.resource.data.level == 1
         && request.resource.data.shortId > 0;
 
@@ -105,6 +114,18 @@ service cloud.firestore {
         && request.resource.data.uid == resource.data.uid
         && request.resource.data.shortId == resource.data.shortId
         && request.resource.data.coins == resource.data.coins
+        && (
+          (!('giftsSentCount' in resource.data) && !('giftsSentCount' in request.resource.data))
+          || request.resource.data.giftsSentCount == resource.data.giftsSentCount
+        )
+        && (
+          (!('giftsReceivedCount' in resource.data) && !('giftsReceivedCount' in request.resource.data))
+          || request.resource.data.giftsReceivedCount == resource.data.giftsReceivedCount
+        )
+        && (
+          (!('freeMessagesUsed' in resource.data) && !('freeMessagesUsed' in request.resource.data))
+          || request.resource.data.freeMessagesUsed == resource.data.freeMessagesUsed
+        )
         && request.resource.data.level == resource.data.level
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.dateOfBirth == resource.data.dateOfBirth
@@ -141,6 +162,73 @@ service cloud.firestore {
         && request.resource.data.next == resource.data.next + 1;
 
       allow delete: if false;
+    }
+
+    match /users/{uid}/coinLedger/{entryId} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+    }
+
+    match /users/{uid}/blocks/{otherUid} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && otherUid != uid
+        && otherUid.size() > 0
+        && otherUid.size() <= 128
+        && request.resource.data.keys().hasOnly(['createdAt'])
+        && request.resource.data.createdAt is int;
+      allow delete: if isOwner(uid);
+      allow update: if false;
+    }
+
+    match /users/{uid}/blockedBy/{blockerUid} {
+      allow read: if isOwner(uid);
+      allow create: if signedIn()
+        && request.auth.uid == blockerUid
+        && blockerUid != uid
+        && blockerUid.size() > 0
+        && blockerUid.size() <= 128
+        && request.resource.data.keys().hasOnly(['createdAt'])
+        && request.resource.data.createdAt is int;
+      allow delete: if signedIn() && request.auth.uid == blockerUid;
+      allow update: if false;
+    }
+
+    match /users/{uid}/rateLimits/{name} {
+      allow read, write: if false;
+    }
+
+    match /config/app {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /adRewards/{rewardId} {
+      allow read, write: if false;
+    }
+
+    match /devices/{deviceIdHash} {
+      allow read, write: if false;
+    }
+
+    match /deviceLinks/{uid} {
+      allow read, write: if false;
+    }
+
+    match /gifts/{giftId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /chats/{chatId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.members;
+      allow write: if false;
+
+      match /messages/{messageId} {
+        allow read: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
+        allow write: if false;
+      }
     }
   }
 }

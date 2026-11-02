@@ -30,6 +30,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +60,7 @@ import com.larkisedosti.app.ui.theme.LoungeSpace
 import com.larkisedosti.app.ui.theme.LoungeTheme
 import com.larkisedosti.app.ui.theme.LoungeType
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 @Composable
@@ -81,6 +83,7 @@ fun CallScreen(
     var flipped by remember { mutableStateOf(false) }
     var needCoins by remember { mutableStateOf(false) }
     var waivedCall by remember { mutableStateOf(waived) }
+    val scope = rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
     var report by remember { mutableStateOf(false) }
     var block by remember { mutableStateOf(false) }
@@ -94,7 +97,9 @@ fun CallScreen(
             dialLabel = "Ringing..."
             delay(900)
             if (phase != "calling") return@LaunchedEffect
-            if (waivedCall || store.chargeCall()) phase = "live" else needCoins = true
+            val paid = waivedCall || store.chargeCall(person.id)
+            if (phase != "calling") return@LaunchedEffect
+            if (paid) phase = "live" else needCoins = true
         }
     }
     LaunchedEffect(phase) {
@@ -240,7 +245,9 @@ fun CallScreen(
                     PrimaryButton(
                         text = "Accept",
                         onClick = {
-                            if (waivedCall || store.chargeCall()) phase = "live" else needCoins = true
+                            scope.launch {
+                                if (waivedCall || store.chargeCall(person.id)) phase = "live" else needCoins = true
+                            }
                         },
                     )
                 }

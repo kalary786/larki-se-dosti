@@ -31,6 +31,7 @@ import com.larkisedosti.app.ui.components.RatePrompt
 import com.larkisedosti.app.ui.screens.CallScreen
 import com.larkisedosti.app.ui.screens.ChatScreen
 import com.larkisedosti.app.ui.screens.ChatsScreen
+import com.larkisedosti.app.ui.screens.CoinHistoryScreen
 import com.larkisedosti.app.ui.screens.CoinStoreScreen
 import com.larkisedosti.app.ui.screens.DiscoverScreen
 import com.larkisedosti.app.ui.screens.EditProfileScreen
@@ -229,7 +230,8 @@ fun LarkiApp() {
                 onCoins = { push("coins") },
             )
         }
-        route == "coins" -> CoinStoreScreen(store = store, onBack = { pop() })
+        route == "coins" -> CoinStoreScreen(store = store, onBack = { pop() }, onHistory = { push("ledger") })
+        route == "ledger" -> CoinHistoryScreen(store = store, onBack = { pop() })
         route == "notes" -> NotificationsScreen(
             store = store,
             onBack = { pop() },

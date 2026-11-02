@@ -38,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
@@ -166,7 +167,7 @@ fun MyProfileScreen(
             InfoChip("${store.country.flag}  ${store.country.name}")
         }
         Spacer(Modifier.height(LoungeSpace.s20))
-        Text(text = "Add up to 3 photos", color = colors.textPrimary, style = LoungeType.title)
+        Text(text = "Photos", color = colors.textPrimary, style = LoungeType.title)
         Spacer(Modifier.height(LoungeSpace.s12))
         Row(horizontalArrangement = Arrangement.spacedBy(LoungeSpace.s8)) {
             repeat(3) { index ->
@@ -174,22 +175,15 @@ fun MyProfileScreen(
                     photo = store.photos.getOrNull(index),
                     progress = store.photoProgress.getOrNull(index),
                     modifier = Modifier.weight(1f),
-                    onClick = {
-                        if (store.photoProgress.getOrNull(index) != null) return@PhotoSlot
-                        slot = index
-                        chooser = true
-                    },
-                    onDelete = { store.deletePhoto(index) },
+                    enabled = false,
+                    onClick = {},
+                    onDelete = {},
                 )
             }
         }
         Spacer(Modifier.height(LoungeSpace.s12))
-        store.photoMessage?.let { message ->
-            Text(text = message, color = colors.danger, style = LoungeType.caption)
-            Spacer(Modifier.height(LoungeSpace.s8))
-        }
         Text(
-            text = "Your photo will be visible to others after review. Until then, people see your name.",
+            text = "Photo upload coming soon",
             color = colors.textSecondary,
             style = LoungeType.body,
             modifier = Modifier
@@ -246,7 +240,7 @@ fun MyProfileScreen(
         ) {
             SettingsRow(AppIcons.User, "Edit Profile", subtitle = "Name, country, gender, photo", onClick = onEdit, showDivider = true)
             SettingsRow(AppIcons.Crown, "Boost Profile", subtitle = "VIP badge, appear first", onClick = { boostOpen = true }, showDivider = true)
-            SettingsRow(AppIcons.Coin, "My Coins", subtitle = "Buy coins", onClick = onCoins, showDivider = true)
+            SettingsRow(AppIcons.Coin, "My Coins", subtitle = "Balance and history", onClick = onCoins, showDivider = true)
             SettingsRow(AppIcons.Users, "My Friends", onClick = onFriends, showDivider = true)
             SettingsRow(
                 AppIcons.Bell,
@@ -340,6 +334,7 @@ private fun PhotoSlot(
     photo: ProfilePhoto?,
     progress: Float?,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -349,9 +344,11 @@ private fun PhotoSlot(
             .aspectRatio(4f / 5f)
             .clip(LoungeShape.input)
             .background(colors.surface)
+            .alpha(if (enabled) 1f else 0.45f)
             .combinedClickable(
+                enabled = enabled,
                 onClick = onClick,
-                onLongClick = { if (photo != null && progress == null) onDelete() },
+                onLongClick = { if (enabled && photo != null && progress == null) onDelete() },
             )
             .drawDashed(colors.outline),
         contentAlignment = Alignment.Center,

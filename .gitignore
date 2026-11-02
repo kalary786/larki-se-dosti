@@ -14,6 +14,11 @@
 *.class
 .cxx
 *.log
+functions/node_modules
+functions/lib
+.firebase
+firebase-debug.log
+ui-debug.log
 .externalNativeBuild
 .navigation
 .kotlin

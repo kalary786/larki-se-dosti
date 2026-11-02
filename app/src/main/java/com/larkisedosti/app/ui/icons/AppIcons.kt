@@ -142,6 +142,12 @@ object AppIcons {
         "M8 11v6",
         "M16 11v6",
     )
+    val Refresh = icon(
+        "M3 12a9 9 0 0 1 15-6.7L21 8",
+        "M21 3v5h-5",
+        "M21 12a9 9 0 0 1-15 6.7L3 16",
+        "M3 21v-5h5",
+    )
     val Send = icon(
         "M22 2L11 13",
         "M22 2l-7 20-4-9-9-4 20-7z",

@@ -18,7 +18,12 @@ import com.google.firebase.auth.FirebaseAuthRecentLoginRequiredException
 import com.google.firebase.auth.FirebaseAuthUserCollisionException
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.functions.FirebaseFunctions
+import com.google.firebase.functions.FirebaseFunctionsException
 import com.google.firebase.storage.FirebaseStorage
+import com.larkisedosti.app.model.CatalogGift
+import com.larkisedosti.app.model.LedgerEntry
 import com.google.firebase.storage.StorageException
 import com.google.firebase.storage.StorageMetadata
 import com.larkisedosti.app.model.Countries
@@ -46,6 +51,7 @@ data class UserProfile(
     val createdAt: Long,
     val onboardingCompleted: Boolean,
     val isGoogleLinked: Boolean,
+    val isTestUser: Boolean = false,
 )
 
 sealed interface AccountGate {
@@ -68,6 +74,29 @@ sealed interface LinkGoogleResult {
 
 class UsernameTakenException : Exception()
 
+sealed interface GiftCallResult {
+    data class Sent(val balance: Int) : GiftCallResult
+    data object Insufficient : GiftCallResult
+    data class Failed(val message: String) : GiftCallResult
+}
+
+sealed interface MessageCallResult {
+    data class Sent(val coins: Int, val freeMessagesLeft: Int) : MessageCallResult
+    data object NoFreeMessages : MessageCallResult
+    data class Failed(val message: String) : MessageCallResult
+}
+
+sealed interface CallChargeResult {
+    data class Charged(val balance: Int) : CallChargeResult
+    data object Insufficient : CallChargeResult
+    data object Failed : CallChargeResult
+}
+
+data class DiscoverPage(
+    val profiles: List<UserProfile>,
+    val hasMore: Boolean,
+)
+
 class FirebaseAccount(context: Context) {
     private val appContext = context.applicationContext
     private val credentials = CredentialManager.create(appContext)
@@ -78,6 +107,22 @@ class FirebaseAccount(context: Context) {
         get() = FirebaseFirestore.getInstance()
     private val storage: FirebaseStorage
         get() = FirebaseStorage.getInstance()
+    private val functions: FirebaseFunctions
+        get() = FirebaseFunctions.getInstance("asia-south1")
+    private val presence = Presence { auth.currentUser?.uid }
+
+    fun bindPresence(
+        onUpdate: (String, Boolean, Long) -> Unit,
+        onClear: (String) -> Unit,
+    ) {
+        presence.onUpdate = onUpdate
+        presence.onClear = onClear
+    }
+
+    fun watchPresence(scope: String, ids: Collection<String>) {
+        if (!ready()) return
+        presence.watch(scope, ids)
+    }
 
     suspend fun enter(): AccountGate {
         if (!ready()) {
@@ -111,6 +156,8 @@ class FirebaseAccount(context: Context) {
         val user = auth.currentUser ?: auth.signInAnonymously().await().user
             ?: error("Couldn't start a session.")
         val uid = user.uid
+        if (!ready()) error("Firebase isn't ready.")
+        registerThisDevice()
         val cleanName = username.trim().lowercase()
         if (!cleanName.matches(usernamePattern)) error("Username doesn't match the rules.")
         keepPhoto(photos.firstOrNull()?.url)
@@ -139,7 +186,10 @@ class FirebaseAccount(context: Context) {
                         "gender" to gender.name,
                         "country" to country.name,
                         "photos" to encodePhotos(photos),
-                        "coins" to STARTING_COINS,
+                        "coins" to 0,
+                        "giftsSentCount" to 0,
+                        "giftsReceivedCount" to 0,
+                        "freeMessagesUsed" to 0,
                         "level" to 1,
                         "isOnline" to true,
                         "lastSeen" to now,
@@ -163,7 +213,7 @@ class FirebaseAccount(context: Context) {
             gender = gender,
             country = country,
             photos = photos,
-            coins = STARTING_COINS,
+            coins = 0,
             level = 1,
             isOnline = true,
             lastSeen = now,
@@ -259,25 +309,241 @@ class FirebaseAccount(context: Context) {
         }
     }
 
-    suspend fun loadDiscoverProfiles(exceptUid: String): List<UserProfile> {
+    private var discoverCursor: com.google.firebase.firestore.DocumentSnapshot? = null
+
+    suspend fun fetchDiscoverPage(gender: String?, country: String?, reset: Boolean): DiscoverPage {
         if (!ready()) error("Firebase isn't ready.")
-        val snapshot = db.collection(USERS).get().await()
-        return snapshot.documents.mapNotNull { document ->
-            if (document.id == exceptUid) return@mapNotNull null
+        if (reset) discoverCursor = null
+        var query: com.google.firebase.firestore.Query = db.collection(USERS)
+            .whereEqualTo("onboardingCompleted", true)
+        if (!gender.isNullOrBlank()) query = query.whereEqualTo("gender", gender)
+        if (!country.isNullOrBlank()) query = query.whereEqualTo("country", country)
+        query = query
+            .orderBy("isOnline", com.google.firebase.firestore.Query.Direction.DESCENDING)
+            .orderBy("lastSeen", com.google.firebase.firestore.Query.Direction.DESCENDING)
+            .limit(20)
+        discoverCursor?.let { cursor -> query = query.startAfter(cursor) }
+        val snapshot = query.get().await()
+        discoverCursor = snapshot.documents.lastOrNull()
+        val profiles = snapshot.documents.mapNotNull { document ->
             val data = document.data ?: return@mapNotNull null
             runCatching { parseProfile(document.id, data) }.getOrNull()
         }
+        return DiscoverPage(profiles, snapshot.size() == 20)
+    }
+
+    suspend fun seedTestUsers() {
+        callTestUsers("seedDiscoverUsers")
+    }
+
+    suspend fun deleteTestUsers() {
+        callTestUsers("deleteDiscoverUsers")
+    }
+
+    private suspend fun callTestUsers(name: String) {
+        if (!ready()) error("Firebase isn't ready.")
+        try {
+            functions.getHttpsCallable(name).call(emptyMap<String, Any>()).await()
+        } catch (error: Exception) {
+            var current: Throwable? = error
+            while (current != null) {
+                if (current is FirebaseFunctionsException &&
+                    (current.code == FirebaseFunctionsException.Code.NOT_FOUND ||
+                        current.code == FirebaseFunctionsException.Code.UNAVAILABLE)
+                ) {
+                    error("Deploy the Cloud Functions first, then try again.")
+                }
+                current = current.cause
+            }
+            throw error
+        }
+    }
+
+    fun listenStats(uid: String, onUpdate: (coins: Int, giftsSent: Int?, freeMessagesUsed: Int) -> Unit): ListenerRegistration? {
+        if (!ready() || uid.isBlank()) return null
+        return db.collection(USERS).document(uid).addSnapshotListener { snap, _ ->
+            if (snap == null || !snap.exists()) return@addSnapshotListener
+            val coins = snap.getLong("coins")?.toInt() ?: return@addSnapshotListener
+            val sent = snap.getLong("giftsSentCount")?.toInt()
+            val used = snap.getLong("freeMessagesUsed")?.toInt() ?: 0
+            onUpdate(coins, sent, used)
+        }
+    }
+
+    fun listenAppSettings(onUpdate: (freeMessages: Int, messageCost: Int, rewardAdFreeMessages: Int) -> Unit): ListenerRegistration? {
+        if (!ready()) return null
+        return db.collection("config").document("app").addSnapshotListener { snap, _ ->
+            if (snap == null || !snap.exists()) return@addSnapshotListener
+            val free = snap.getLong("freeMessages")?.toInt() ?: return@addSnapshotListener
+            val cost = snap.getLong("messageCost")?.toInt() ?: return@addSnapshotListener
+            val reward = snap.getLong("rewardAdFreeMessages")?.toInt() ?: return@addSnapshotListener
+            if (free <= 0 || cost <= 0 || reward <= 0) return@addSnapshotListener
+            onUpdate(free, cost, reward)
+        }
+    }
+
+    fun listenGifts(onUpdate: (List<CatalogGift>) -> Unit): ListenerRegistration? {
+        if (!ready()) return null
+        return db.collection("gifts").addSnapshotListener { snap, _ ->
+            val gifts = snap?.documents?.mapNotNull { doc ->
+                val name = doc.getString("name") ?: return@mapNotNull null
+                val emoji = doc.getString("emoji") ?: return@mapNotNull null
+                val price = doc.getLong("price")?.toInt() ?: return@mapNotNull null
+                if (doc.getBoolean("active") == false || price <= 0) return@mapNotNull null
+                CatalogGift(
+                    id = doc.id,
+                    name = name,
+                    emoji = emoji,
+                    price = price,
+                    sortOrder = doc.getLong("sortOrder")?.toInt() ?: 0,
+                )
+            }.orEmpty().sortedBy { it.sortOrder }
+            onUpdate(gifts)
+        }
+    }
+
+    fun listenLedger(uid: String, onUpdate: (List<LedgerEntry>) -> Unit): ListenerRegistration? {
+        if (!ready() || uid.isBlank()) return null
+        return db.collection(USERS).document(uid).collection("coinLedger")
+            .orderBy("createdAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
+            .limit(50)
+            .addSnapshotListener { snap, _ ->
+                val rows = snap?.documents?.map { doc ->
+                    LedgerEntry(
+                        id = doc.id,
+                        type = doc.getString("type") ?: "admin",
+                        amount = doc.getLong("amount")?.toInt() ?: 0,
+                        balanceAfter = doc.getLong("balanceAfter")?.toInt() ?: 0,
+                        createdAt = doc.getTimestamp("createdAt")?.toDate()?.time ?: 0L,
+                    )
+                }.orEmpty()
+                onUpdate(rows)
+            }
+    }
+
+    fun listenBlocks(uid: String, onUpdate: (List<String>) -> Unit): ListenerRegistration? {
+        if (!ready() || uid.isBlank()) return null
+        return db.collection(USERS).document(uid).collection("blocks")
+            .addSnapshotListener { snap, _ ->
+                onUpdate(snap?.documents?.map { it.id }.orEmpty())
+            }
+    }
+
+    fun listenBlockedBy(uid: String, onUpdate: (List<String>) -> Unit): ListenerRegistration? {
+        if (!ready() || uid.isBlank()) return null
+        return db.collection(USERS).document(uid).collection("blockedBy")
+            .addSnapshotListener { snap, _ ->
+                onUpdate(snap?.documents?.map { it.id }.orEmpty())
+            }
+    }
+
+    fun saveBlock(uid: String, otherUid: String, blocked: Boolean) {
+        if (!ready() || uid.isBlank() || otherUid.isBlank() || uid == otherUid) return
+        val stamp = mapOf("createdAt" to System.currentTimeMillis())
+        val mine = db.collection(USERS).document(uid).collection("blocks").document(otherUid)
+        val theirs = db.collection(USERS).document(otherUid).collection("blockedBy").document(uid)
+        if (blocked) {
+            mine.set(stamp)
+            theirs.set(stamp)
+        } else {
+            mine.delete()
+            theirs.delete()
+        }
+    }
+
+    suspend fun ensureGiftCatalog() {
+        if (!ready()) return
+        try {
+            functions.getHttpsCallable("ensureGiftCatalog").call(emptyMap<String, Any>()).await()
+        } catch (_: Exception) {
+            // The sheet stays empty until the catalog can be written.
+        }
+    }
+
+    suspend fun sendGift(receiverUid: String, giftId: String, chatId: String): GiftCallResult {
+        if (!ready()) return GiftCallResult.Failed("Firebase isn't ready.")
+        return try {
+            val result = functions.getHttpsCallable("sendGift").call(
+                hashMapOf(
+                    "receiverUid" to receiverUid,
+                    "giftId" to giftId,
+                    "chatId" to chatId,
+                ),
+            ).await()
+            val data = result.getData() as? Map<*, *>
+            val balance = (data?.get("balance") as? Number)?.toInt()
+                ?: return GiftCallResult.Failed("The gift could not be sent. Try again.")
+            GiftCallResult.Sent(balance)
+        } catch (error: Exception) {
+            when (functionCode(error)) {
+                "insufficient_coins" -> GiftCallResult.Insufficient
+                "blocked" -> GiftCallResult.Failed("You can't send a gift to this person.")
+                "rate_limited" -> GiftCallResult.Failed("You can send up to 20 gifts a minute.")
+                "user_not_found" -> GiftCallResult.Failed("That person is not available.")
+                "gift_not_found", "gift_unavailable" -> GiftCallResult.Failed("That gift is not available.")
+                "same_user" -> GiftCallResult.Failed("You can't send a gift to yourself.")
+                else -> GiftCallResult.Failed("The gift could not be sent. Try again.")
+            }
+        }
+    }
+
+    suspend fun sendMessage(chatId: String, receiverUid: String, text: String, messageId: String): MessageCallResult {
+        if (!ready()) return MessageCallResult.Failed("Firebase isn't ready.")
+        return try {
+            val result = functions.getHttpsCallable("sendMessage").call(
+                hashMapOf(
+                    "chatId" to chatId,
+                    "receiverUid" to receiverUid,
+                    "text" to text,
+                    "messageId" to messageId,
+                ),
+            ).await()
+            val data = result.getData() as? Map<*, *>
+            val coins = (data?.get("coins") as? Number)?.toInt()
+                ?: return MessageCallResult.Failed("The message could not be sent. Try again.")
+            val left = (data["freeMessagesLeft"] as? Number)?.toInt() ?: 0
+            MessageCallResult.Sent(coins, left)
+        } catch (error: Exception) {
+            when (functionCode(error)) {
+                "no_free_messages" -> MessageCallResult.NoFreeMessages
+                "blocked" -> MessageCallResult.Failed("You can't message this person.")
+                "rate_limited" -> MessageCallResult.Failed("You can send up to 30 messages a minute.")
+                "user_not_found" -> MessageCallResult.Failed("That person is not available.")
+                "same_user" -> MessageCallResult.Failed("You can't message yourself.")
+                else -> MessageCallResult.Failed("The message could not be sent. Try again.")
+            }
+        }
+    }
+
+    suspend fun chargeCall(otherUid: String): CallChargeResult {
+        if (!ready()) return CallChargeResult.Failed
+        return try {
+            val result = functions.getHttpsCallable("chargeCall").call(
+                hashMapOf("otherUid" to otherUid),
+            ).await()
+            val data = result.getData() as? Map<*, *>
+            val balance = (data?.get("balance") as? Number)?.toInt() ?: return CallChargeResult.Failed
+            CallChargeResult.Charged(balance)
+        } catch (error: Exception) {
+            if (functionCode(error) == "insufficient_coins") CallChargeResult.Insufficient else CallChargeResult.Failed
+        }
+    }
+
+    fun chatIdFor(a: String, b: String): String = listOf(a, b).sorted().joinToString("_")
+
+    private fun functionCode(error: Exception): String {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is FirebaseFunctionsException) return current.message.orEmpty()
+            current = current.cause
+        }
+        return ""
     }
 
     fun setOnline(online: Boolean) {
         if (!ready()) return
-        val uid = auth.currentUser?.uid ?: return
-        db.collection(USERS).document(uid).update(
-            mapOf(
-                "isOnline" to online,
-                "lastSeen" to System.currentTimeMillis(),
-            ),
-        )
+        if (auth.currentUser?.uid == null) return
+        presence.setWanted(online)
     }
 
     suspend fun signInWithGoogle(activity: Activity): GoogleAuthResult {
@@ -335,6 +601,7 @@ class FirebaseAccount(context: Context) {
 
     suspend fun deleteAccount() {
         val uid = auth.currentUser?.uid ?: return
+        presence.clear()
         val profile = loadProfile(uid)
         db.collection(USERS).document(uid).delete().await()
         if (profile != null && profile.username.isNotBlank()) {
@@ -351,6 +618,7 @@ class FirebaseAccount(context: Context) {
     }
 
     suspend fun logOut() {
+        presence.clear()
         auth.signOut()
         pendingGoogleCredential = null
         auth.signInAnonymously().await()
@@ -362,7 +630,10 @@ class FirebaseAccount(context: Context) {
         if (FirebaseApp.getApps(appContext).isEmpty()) {
             FirebaseApp.initializeApp(appContext)
         }
-        return FirebaseApp.getApps(appContext).isNotEmpty()
+        if (FirebaseApp.getApps(appContext).isEmpty()) return false
+        installAppCheck()
+        connectEmulators()
+        return true
     }
 
     fun keepPhoto(uri: String?) {
@@ -402,13 +673,14 @@ class FirebaseAccount(context: Context) {
             gender = gender,
             country = country,
             photos = decodePhotos(data["photos"]),
-            coins = (data["coins"] as? Number)?.toInt() ?: STARTING_COINS,
+            coins = (data["coins"] as? Number)?.toInt() ?: 0,
             level = (data["level"] as? Number)?.toInt() ?: 1,
             isOnline = data["isOnline"] as? Boolean ?: false,
             lastSeen = (data["lastSeen"] as? Number)?.toLong() ?: 0L,
             createdAt = (data["createdAt"] as? Number)?.toLong() ?: 0L,
             onboardingCompleted = true,
             isGoogleLinked = data["isGoogleLinked"] as? Boolean ?: false,
+            isTestUser = data["isTestUser"] as? Boolean ?: false,
         )
     }
 
@@ -487,8 +759,48 @@ class FirebaseAccount(context: Context) {
         return List(3) { index -> parsed.getOrNull(index) }
     }
 
+    private fun installAppCheck() {
+        if (appCheckInstalled) return
+        com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
+            .installAppCheckProviderFactory(appCheckFactory())
+        appCheckInstalled = true
+    }
+
+    private suspend fun registerThisDevice() {
+        val deviceId = android.provider.Settings.Secure.getString(
+            appContext.contentResolver,
+            android.provider.Settings.Secure.ANDROID_ID,
+        )?.trim()?.lowercase().orEmpty()
+        if (!deviceId.matches(Regex("^[0-9a-f]{8,64}$"))) {
+            error("This phone couldn't be checked. Try again.")
+        }
+        functions.getHttpsCallable("registerDevice").call(hashMapOf("deviceId" to deviceId)).await()
+    }
+
+    suspend fun ensureDeviceRegistered() {
+        if (!ready() || auth.currentUser == null) return
+        try {
+            registerThisDevice()
+        } catch (_: Exception) {
+            // The next launch tries again. Messages stay locked until the device is stored.
+        }
+    }
+
+    private fun connectEmulators() {
+        if (!USE_EMULATORS || emulatorsConnected) return
+        emulatorsConnected = true
+        FirebaseAuth.getInstance().useEmulator(EMULATOR_HOST, 9099)
+        FirebaseFirestore.getInstance().useEmulator(EMULATOR_HOST, 8080)
+        FirebaseFunctions.getInstance("asia-south1").useEmulator(EMULATOR_HOST, 5001)
+        runCatching { com.google.firebase.database.FirebaseDatabase.getInstance().useEmulator(EMULATOR_HOST, 9000) }
+    }
+
     companion object {
         const val STARTING_COINS = 50
+        private const val USE_EMULATORS = false
+        private const val EMULATOR_HOST = "10.0.2.2"
+        private var emulatorsConnected = false
+        private var appCheckInstalled = false
         private const val USERS = "users"
         private const val USERNAMES = "usernames"
         private const val COUNTERS = "counters"

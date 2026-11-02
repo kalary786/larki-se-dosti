@@ -19,22 +19,26 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import com.larkisedosti.app.model.presenceLabel
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.larkisedosti.app.model.AppStore
-import com.larkisedosti.app.model.GiftKind
+import com.larkisedosti.app.model.CatalogGift
+import com.larkisedosti.app.model.GiftSendResult
 import com.larkisedosti.app.model.Person
 import com.larkisedosti.app.ui.components.BlockUserDialog
 import com.larkisedosti.app.ui.components.IconCircleButton
@@ -46,6 +50,7 @@ import com.larkisedosti.app.ui.icons.AppIcons
 import com.larkisedosti.app.ui.theme.LoungeSpace
 import com.larkisedosti.app.ui.theme.LoungeTheme
 import com.larkisedosti.app.ui.theme.LoungeType
+import kotlinx.coroutines.launch
 
 @Composable
 fun ProfileDetailScreen(
@@ -57,19 +62,27 @@ fun ProfileDetailScreen(
     onVideo: () -> Unit,
     onCoins: () -> Unit,
 ) {
-    val person = store.person(personId)
-    LaunchedEffect(person) {
-        if (person == null) onBack()
+    val raw = store.person(personId)
+    LaunchedEffect(raw) {
+        if (raw == null) onBack()
     }
-    if (person == null) return
+    if (raw == null) return
+    val person = store.live(raw)
+    DisposableEffect(personId) {
+        store.watchPresence("profile", listOf(personId))
+        onDispose { store.watchPresence("profile", emptyList()) }
+    }
     val colors = LoungeTheme.colors
     var menu by rememberSaveable { mutableStateOf(false) }
     var report by rememberSaveable { mutableStateOf(false) }
     var block by rememberSaveable { mutableStateOf(false) }
     var giftOpen by rememberSaveable { mutableStateOf(false) }
-    var pendingGift by remember { mutableStateOf<GiftKind?>(null) }
+    var pendingGift by remember { mutableStateOf<CatalogGift?>(null) }
     var needCoins by rememberSaveable { mutableStateOf(false) }
     var burst by rememberSaveable { mutableStateOf<String?>(null) }
+    var sendingGift by remember { mutableStateOf(false) }
+    var giftError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     val gallery = if (person.photoUrls.isNotEmpty()) person.photoUrls else listOfNotNull(person.photoUrl)
     val panels = if (person.photoUrls.isNotEmpty()) gallery.size else person.panels.coerceIn(1, 3)
     val pager = rememberPagerState { panels }
@@ -82,17 +95,10 @@ fun ProfileDetailScreen(
                     .height(420.dp),
             ) {
                 HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
-                    val shade = 1f - page * 0.08f
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(
-                                Color(
-                                    red = person.color.red * shade,
-                                    green = person.color.green * shade,
-                                    blue = person.color.blue * shade,
-                                ),
-                            ),
+                            .background(avatarBrush(person.id)),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
@@ -187,9 +193,17 @@ fun ProfileDetailScreen(
                         }
                     }
                 }
+                if (person.username.isNotBlank()) {
+                    Spacer(Modifier.height(LoungeSpace.s4))
+                    Text(
+                        text = "@${person.username}",
+                        color = colors.textSecondary,
+                        style = LoungeType.body,
+                    )
+                }
                 Spacer(Modifier.height(LoungeSpace.s4))
                 Text(
-                    text = if (person.online) "Online" else "Offline",
+                    text = presenceLabel(person.online, person.lastSeen),
                     color = if (person.online) colors.online else colors.textSecondary,
                     style = LoungeType.caption,
                 )
@@ -222,22 +236,38 @@ fun ProfileDetailScreen(
         }
     }
 
+    LaunchedEffect(giftOpen) {
+        if (giftOpen && store.giftCatalog.isEmpty()) store.ensureGiftCatalog()
+    }
     SendGiftSheet(
         visible = giftOpen,
         recipient = person.name,
         balance = store.coins,
+        gifts = store.giftCatalog,
+        sending = sendingGift,
+        error = giftError,
         onClose = { giftOpen = false },
         onAddCoins = {
             giftOpen = false
             onCoins()
         },
         onSend = { gift ->
-            if (store.sendGift(person.id, gift)) {
-                giftOpen = false
-                burst = gift.title
-            } else {
-                pendingGift = gift
-                needCoins = true
+            if (sendingGift) return@SendGiftSheet
+            scope.launch {
+                sendingGift = true
+                giftError = null
+                when (val result = store.sendGift(person.id, gift)) {
+                    is GiftSendResult.Sent -> {
+                        giftOpen = false
+                        burst = result.name
+                    }
+                    GiftSendResult.Insufficient -> {
+                        pendingGift = gift
+                        needCoins = true
+                    }
+                    is GiftSendResult.Failed -> giftError = result.message
+                }
+                sendingGift = false
             }
         },
     )
@@ -246,19 +276,13 @@ fun ProfileDetailScreen(
         balance = store.coins,
         needed = pendingGift?.price ?: AppStore.CallCost,
         forCall = false,
+        allowFreeTry = false,
         onBuyCoins = {
             needCoins = false
             giftOpen = false
             onCoins()
         },
-        onFreeTry = {
-            val gift = pendingGift
-            needCoins = false
-            if (gift != null && store.sendGift(person.id, gift, free = true)) {
-                giftOpen = false
-                burst = gift.title
-            }
-        },
+        onFreeTry = { needCoins = false },
         onDismiss = { needCoins = false },
     )
     ReportUserDialog(
@@ -299,7 +323,7 @@ private fun ActionRow(
         Action("Message", AppIcons.Message, LoungeTheme.colors.textPrimary, onMessage)
         Action("Voice", AppIcons.Phone, LoungeTheme.colors.online, onVoice)
         Action("Video", AppIcons.Video, LoungeTheme.colors.primary, onVideo)
-        Action(if (friend) "Friends" else "Add", if (friend) AppIcons.Check else AppIcons.UserPlus, LoungeTheme.colors.textPrimary, onAddFriend)
+        Action(if (friend) "Friends" else "Add friend", if (friend) AppIcons.Check else AppIcons.UserPlus, LoungeTheme.colors.textPrimary, onAddFriend)
         Action("Gift", AppIcons.Gift, LoungeTheme.colors.coin, onGift)
     }
 }
