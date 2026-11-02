@@ -37,10 +37,12 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,9 +58,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import android.app.Activity
+import androidx.compose.ui.platform.LocalContext
+import com.larkisedosti.app.data.MessageRewardAd
 import com.larkisedosti.app.model.AppStore
+import com.larkisedosti.app.model.presenceLabel
 import com.larkisedosti.app.model.ChatMessage
+import com.larkisedosti.app.model.CatalogGift
 import com.larkisedosti.app.model.GiftKind
+import com.larkisedosti.app.model.GiftSendResult
+import com.larkisedosti.app.model.MessageDelivery
+import com.larkisedosti.app.model.TextSendResult
+import com.larkisedosti.app.ui.components.BottomSheet
+import com.larkisedosti.app.ui.components.GhostButton
+import com.larkisedosti.app.ui.components.PrimaryButton
+import com.larkisedosti.app.ui.components.SecondaryButton
 import com.larkisedosti.app.model.formatChatDay
 import com.larkisedosti.app.model.formatClock
 import com.larkisedosti.app.ui.components.Avatar
@@ -75,6 +89,7 @@ import com.larkisedosti.app.ui.theme.LoungeSpace
 import com.larkisedosti.app.ui.theme.LoungeTheme
 import com.larkisedosti.app.ui.theme.LoungeType
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun ChatScreen(
@@ -85,11 +100,16 @@ fun ChatScreen(
     onVideo: () -> Unit,
     onCoins: () -> Unit,
 ) {
-    val person = store.person(personId)
+    val raw = store.person(personId)
     LaunchedEffect(personId) { store.markRead(personId) }
-    if (person == null) {
+    if (raw == null) {
         LaunchedEffect(Unit) { onBack() }
         return
+    }
+    val person = store.live(raw)
+    DisposableEffect(personId) {
+        store.watchPresence("chat", listOf(personId))
+        onDispose { store.watchPresence("chat", emptyList()) }
     }
     val colors = LoungeTheme.colors
     val conversation = store.openConversation(personId)
@@ -98,21 +118,44 @@ fun ChatScreen(
     var menu by remember { mutableStateOf(false) }
     var muted by remember { mutableStateOf(false) }
     var giftOpen by remember { mutableStateOf(false) }
-    var pendingGift by remember { mutableStateOf<GiftKind?>(null) }
+    var pendingGift by remember { mutableStateOf<CatalogGift?>(null) }
     var needCoins by remember { mutableStateOf(false) }
+    var sendingGift by remember { mutableStateOf(false) }
+    var giftError by remember { mutableStateOf<String?>(null) }
+    var messageError by remember { mutableStateOf<String?>(null) }
+    var freeMessagesSheet by remember { mutableStateOf(false) }
+    var loadingReward by remember { mutableStateOf(false) }
+    var rewardNote by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val activity = LocalContext.current as? Activity
     var burst by remember { mutableStateOf<String?>(null) }
     var report by remember { mutableStateOf(false) }
     var block by remember { mutableStateOf(false) }
     var delete by remember { mutableStateOf(false) }
     var typing by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    fun deliver(messageId: String, text: String) {
+        scope.launch {
+            messageError = null
+            when (val result = store.sendText(person.id, messageId, text)) {
+                TextSendResult.Sent -> if (person.online) typing = true
+                TextSendResult.NoFreeMessages -> freeMessagesSheet = true
+                is TextSendResult.Failed -> messageError = result.message
+            }
+        }
+    }
     val sendDraft = {
         val text = draft.trim()
-        if (text.isNotEmpty()) {
-            store.sendText(person.id, text)
+        if (text.isNotEmpty() && text.length <= 1000) {
+            val messageId = store.newMessageId()
+            store.showOutgoing(person.id, messageId, text)
             draft = ""
-            if (person.online) typing = true
+            deliver(messageId, text)
         }
+    }
+    val retryMessage = { message: ChatMessage ->
+        store.showOutgoing(person.id, message.id, message.text)
+        deliver(message.id, message.text)
     }
     LaunchedEffect(typing) {
         if (typing) {
@@ -188,8 +231,7 @@ fun ChatScreen(
                     Text(
                         text = when {
                             typing -> "Typing..."
-                            person.online -> "Online"
-                            else -> "Offline"
+                            else -> presenceLabel(person.online, person.lastSeen)
                         },
                         color = if (typing || person.online) colors.online else colors.textSecondary,
                         style = LoungeType.caption,
@@ -264,6 +306,11 @@ fun ChatScreen(
                             color = person.color,
                             online = person.online,
                             showAvatar = row.showAvatar,
+                            onRetry = if (row.message.delivery == MessageDelivery.Failed) {
+                                { retryMessage(row.message) }
+                            } else {
+                                null
+                            },
                         )
                         is ChatRow.Gift -> GiftMessage(row.message, person.name)
                     }
@@ -273,6 +320,33 @@ fun ChatScreen(
                         TypingRow(name = person.name, color = person.color, online = person.online)
                     }
                 }
+            }
+            if (store.messageAllowanceKnown) {
+                val allowance = if (store.freeMessagesLeft > 0) {
+                    "${store.freeMessagesLeft} free messages left"
+                } else {
+                    "Each message costs ${store.messageCost} coins · Balance: ${store.coins}"
+                }
+                Text(
+                    text = allowance,
+                    color = colors.textSecondary,
+                    style = LoungeType.caption,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = LoungeSpace.s16, vertical = 4.dp),
+                    textAlign = TextAlign.Center,
+                )
+            }
+            if (!messageError.isNullOrBlank()) {
+                Text(
+                    text = messageError.orEmpty(),
+                    color = colors.danger,
+                    style = LoungeType.caption,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = LoungeSpace.s16),
+                    textAlign = TextAlign.Center,
+                )
             }
             if (emojiOpen) {
                 Row(
@@ -358,22 +432,38 @@ fun ChatScreen(
         burst?.let { title -> GiftBurst(title = title, onFinished = { burst = null }) }
     }
 
+    LaunchedEffect(giftOpen) {
+        if (giftOpen && store.giftCatalog.isEmpty()) store.ensureGiftCatalog()
+    }
     SendGiftSheet(
         visible = giftOpen,
         recipient = person.name,
         balance = store.coins,
+        gifts = store.giftCatalog,
+        sending = sendingGift,
+        error = giftError,
         onClose = { giftOpen = false },
         onAddCoins = {
             giftOpen = false
             onCoins()
         },
         onSend = { gift ->
-            if (store.sendGift(person.id, gift)) {
-                giftOpen = false
-                burst = gift.title
-            } else {
-                pendingGift = gift
-                needCoins = true
+            if (sendingGift) return@SendGiftSheet
+            scope.launch {
+                sendingGift = true
+                giftError = null
+                when (val result = store.sendGift(person.id, gift)) {
+                    is GiftSendResult.Sent -> {
+                        giftOpen = false
+                        burst = result.name
+                    }
+                    GiftSendResult.Insufficient -> {
+                        pendingGift = gift
+                        needCoins = true
+                    }
+                    is GiftSendResult.Failed -> giftError = result.message
+                }
+                sendingGift = false
             }
         },
     )
@@ -382,20 +472,75 @@ fun ChatScreen(
         balance = store.coins,
         needed = pendingGift?.price ?: AppStore.CallCost,
         forCall = false,
+        allowFreeTry = false,
         onBuyCoins = {
             needCoins = false
             onCoins()
         },
-        onFreeTry = {
-            val gift = pendingGift
-            needCoins = false
-            if (gift != null && store.sendGift(person.id, gift, free = true)) {
-                giftOpen = false
-                burst = gift.title
-            }
-        },
+        onFreeTry = { needCoins = false },
         onDismiss = { needCoins = false },
     )
+    val rewardCount = if (store.rewardAdFreeMessages > 0) store.rewardAdFreeMessages else 3
+    BottomSheet(
+        visible = freeMessagesSheet,
+        onDismiss = {
+            if (!loadingReward) freeMessagesSheet = false
+        },
+    ) {
+        Text(
+            text = "You've used your free messages",
+            color = colors.textPrimary,
+            style = LoungeType.h2,
+        )
+        Spacer(Modifier.height(LoungeSpace.s8))
+        Text(
+            text = "Buy coins to keep chatting, or watch a short video for $rewardCount free messages.",
+            color = colors.textSecondary,
+            style = LoungeType.body,
+        )
+        if (!rewardNote.isNullOrBlank()) {
+            Spacer(Modifier.height(LoungeSpace.s8))
+            Text(text = rewardNote.orEmpty(), color = colors.textSecondary, style = LoungeType.caption)
+        }
+        Spacer(Modifier.height(LoungeSpace.s20))
+        PrimaryButton(
+            text = "Buy Coins",
+            onClick = {
+                freeMessagesSheet = false
+                onCoins()
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(LoungeSpace.s8))
+        SecondaryButton(
+            text = if (loadingReward) "Opening video" else "Watch video – $rewardCount free messages",
+            onClick = {
+                val host = activity
+                if (host != null && !loadingReward) {
+                loadingReward = true
+                rewardNote = null
+                MessageRewardAd.show(host, store.userId) { shown ->
+                    host.runOnUiThread {
+                        loadingReward = false
+                        rewardNote = if (shown) {
+                            "When the video finishes, your free messages update from the server."
+                        } else {
+                            "The video isn't available right now."
+                        }
+                    }
+                }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !loadingReward,
+        )
+        Spacer(Modifier.height(LoungeSpace.s8))
+        GhostButton(
+            text = "Not now",
+            onClick = { freeMessagesSheet = false },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
     ReportUserDialog(
         visible = report,
         name = person.name,
@@ -500,6 +645,7 @@ private fun Bubble(
     color: Color,
     online: Boolean,
     showAvatar: Boolean,
+    onRetry: (() -> Unit)?,
 ) {
     val colors = LoungeTheme.colors
     val mine = message.fromMe
@@ -529,12 +675,29 @@ private fun Bubble(
                 style = LoungeType.body,
                 modifier = Modifier
                     .widthIn(max = 260.dp)
+                    .graphicsLayer {
+                        alpha = if (message.delivery == MessageDelivery.Sending) 0.55f else 1f
+                    }
                     .clip(RoundedCornerShape(18.dp))
                     .background(if (mine) colors.primary else colors.surface)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
             )
             Spacer(Modifier.height(4.dp))
-            Text(text = formatClock(message.sentAt), color = colors.textSecondary, style = LoungeType.caption)
+            if (message.delivery == MessageDelivery.Failed && onRetry != null) {
+                IconCircleButton(
+                    icon = AppIcons.Refresh,
+                    contentDescription = "Retry",
+                    onClick = onRetry,
+                    size = 28.dp,
+                    tint = colors.danger,
+                )
+            } else {
+                Text(
+                    text = if (message.delivery == MessageDelivery.Sending) "Sending" else formatClock(message.sentAt),
+                    color = colors.textSecondary,
+                    style = LoungeType.caption,
+                )
+            }
         }
     }
 }

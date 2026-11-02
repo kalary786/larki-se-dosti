@@ -34,7 +34,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.larkisedosti.app.model.GiftKind
+import com.larkisedosti.app.model.CatalogGift
 import com.larkisedosti.app.ui.components.BottomSheet
 import com.larkisedosti.app.ui.components.CoinPill
 import com.larkisedosti.app.ui.components.IconCircleButton
@@ -49,12 +49,15 @@ fun SendGiftSheet(
     visible: Boolean,
     recipient: String,
     balance: Int,
+    gifts: List<CatalogGift>,
+    sending: Boolean,
+    error: String?,
     onClose: () -> Unit,
     onAddCoins: () -> Unit,
-    onSend: (GiftKind) -> Unit,
+    onSend: (CatalogGift) -> Unit,
 ) {
     val colors = LoungeTheme.colors
-    var confirm by remember { mutableStateOf<GiftKind?>(null) }
+    var confirm by remember { mutableStateOf<CatalogGift?>(null) }
     LaunchedEffect(visible) {
         if (!visible) confirm = null
     }
@@ -101,19 +104,19 @@ fun SendGiftSheet(
             verticalArrangement = Arrangement.spacedBy(LoungeSpace.s8),
             modifier = Modifier.height(320.dp),
         ) {
-            items(GiftKind.entries, key = { it.name }) { gift ->
-                val pending = confirm == gift
+            items(gifts, key = { it.id }) { gift ->
+                val pending = confirm?.id == gift.id
                 Column(
                     modifier = Modifier
                         .clip(LoungeShape.card)
                         .background(colors.surface)
                         .border(1.dp, if (pending) colors.primary else colors.border, LoungeShape.card)
-                        .clickable(enabled = !pending) { confirm = gift }
+                        .clickable(enabled = !pending && !sending) { confirm = gift }
                         .padding(vertical = LoungeSpace.s12, horizontal = LoungeSpace.s8),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        text = gift.emoji(),
+                        text = gift.emoji,
                         fontSize = 36.sp,
                         textAlign = TextAlign.Center,
                     )
@@ -127,18 +130,18 @@ fun SendGiftSheet(
                         )
                         Spacer(Modifier.height(LoungeSpace.s8))
                         Text(
-                            text = "Send",
+                            text = if (sending) "Sending" else "Send",
                             color = colors.onPrimary,
                             style = LoungeType.caption,
                             modifier = Modifier
                                 .clip(LoungeShape.button)
                                 .background(colors.primary)
-                                .clickable { onSend(gift) }
+                                .clickable(enabled = !sending) { onSend(gift) }
                                 .padding(horizontal = 14.dp, vertical = 6.dp),
                         )
                     } else {
                         Text(
-                            text = gift.title,
+                            text = gift.name,
                             color = colors.textPrimary,
                             style = LoungeType.caption,
                             textAlign = TextAlign.Center,
@@ -163,6 +166,17 @@ fun SendGiftSheet(
                     }
                 }
             }
+        }
+        if (gifts.isEmpty()) {
+            Text(
+                text = "Gifts are loading.",
+                color = colors.textSecondary,
+                style = LoungeType.body,
+            )
+        }
+        if (!error.isNullOrBlank()) {
+            Spacer(Modifier.height(LoungeSpace.s12))
+            Text(text = error, color = colors.danger, style = LoungeType.caption)
         }
     }
 }
@@ -218,13 +232,4 @@ fun GiftBurst(
             Text(text = title, color = colors.textPrimary, style = LoungeType.h2)
         }
     }
-}
-
-private fun GiftKind.emoji(): String = when (this) {
-    GiftKind.Rose -> "\uD83C\uDF39"
-    GiftKind.Heart -> "\u2764\uFE0F"
-    GiftKind.Star -> "\u2B50"
-    GiftKind.Bouquet -> "\uD83D\uDC90"
-    GiftKind.Diamond -> "\uD83D\uDC8E"
-    GiftKind.Crown -> "\uD83D\uDC51"
 }

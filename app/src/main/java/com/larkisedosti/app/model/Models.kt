@@ -67,7 +67,15 @@ data class Person(
     val panels: Int,
     val photoUrl: String? = null,
     val photoUrls: List<String> = emptyList(),
+    val username: String = "",
+    val lastSeen: Long = 0L,
 )
+
+enum class MessageDelivery {
+    Sending,
+    Sent,
+    Failed,
+}
 
 data class ChatMessage(
     val id: String,
@@ -76,6 +84,35 @@ data class ChatMessage(
     val time: String,
     val gift: GiftKind? = null,
     val sentAt: Long = System.currentTimeMillis(),
+    val delivery: MessageDelivery = MessageDelivery.Sent,
+)
+
+data class CatalogGift(
+    val id: String,
+    val name: String,
+    val emoji: String,
+    val price: Int,
+    val sortOrder: Int,
+)
+
+sealed interface TextSendResult {
+    data object Sent : TextSendResult
+    data object NoFreeMessages : TextSendResult
+    data class Failed(val message: String) : TextSendResult
+}
+
+sealed interface GiftSendResult {
+    data class Sent(val name: String) : GiftSendResult
+    data object Insufficient : GiftSendResult
+    data class Failed(val message: String) : GiftSendResult
+}
+
+data class LedgerEntry(
+    val id: String,
+    val type: String,
+    val amount: Int,
+    val balanceAfter: Int,
+    val createdAt: Long,
 )
 
 enum class GiftKind(

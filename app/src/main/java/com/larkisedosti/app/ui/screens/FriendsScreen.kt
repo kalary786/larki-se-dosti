@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.larkisedosti.app.model.AppStore
+import com.larkisedosti.app.model.presenceLabel
 import com.larkisedosti.app.ui.components.Avatar
 import com.larkisedosti.app.ui.components.EmptyState
 import com.larkisedosti.app.ui.components.GhostButton
@@ -50,8 +52,14 @@ fun FriendsScreen(
     LaunchedEffect(openRequests) {
         if (openRequests) tab = "Requests"
     }
-    val friends = store.friendIds.mapNotNull { store.person(it) }.filter { it.id !in store.blockedIds }
+    val friends = store.friendIds.mapNotNull { store.person(it)?.let(store::live) }.filter { it.id !in store.blockedIds }
     val requests = store.requestIds.mapNotNull { store.person(it) }.filter { it.id !in store.blockedIds }
+    DisposableEffect(Unit) {
+        onDispose { store.watchPresence("friends", emptyList()) }
+    }
+    LaunchedEffect(friends.map { it.id }) {
+        store.watchPresence("friends", friends.map { it.id })
+    }
 
     Column(
         modifier = Modifier
@@ -100,7 +108,7 @@ fun FriendsScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(text = person.name, color = colors.textPrimary, style = LoungeType.title)
                                 Text(
-                                    text = if (person.online) "Online" else "Offline",
+                                    text = presenceLabel(person.online, person.lastSeen),
                                     color = if (person.online) colors.online else colors.textSecondary,
                                     style = LoungeType.caption,
                                 )

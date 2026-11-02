@@ -6,18 +6,27 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import com.google.firebase.firestore.ListenerRegistration
+import com.larkisedosti.app.data.CallChargeResult
 import com.larkisedosti.app.data.FirebaseAccount
+import com.larkisedosti.app.data.GiftCallResult
 import com.larkisedosti.app.data.GoogleAuthResult
+import com.larkisedosti.app.data.MessageCallResult
 import com.larkisedosti.app.data.LinkGoogleResult
+import com.larkisedosti.app.BuildConfig
+import com.larkisedosti.app.data.PresenceState
 import com.larkisedosti.app.data.UserProfile
 import com.larkisedosti.app.data.UsernameTakenException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.Calendar
 
@@ -40,8 +49,14 @@ class AppStore(
     val photoProgress = mutableStateListOf<Float?>(null, null, null)
     var photoMessage by mutableStateOf<String?>(null)
     val reports = mutableStateListOf<UserReport>()
-    var coins by mutableIntStateOf(StartingCoins)
+    var coins by mutableIntStateOf(0)
+    var freeMessagesUsed by mutableIntStateOf(0)
+    var freeMessageQuota by mutableIntStateOf(0)
+    var messageCost by mutableIntStateOf(0)
+    var rewardAdFreeMessages by mutableIntStateOf(0)
+    var messageAllowanceKnown by mutableStateOf(false)
     var giftsSent by mutableIntStateOf(0)
+    val giftCatalog = mutableStateListOf<CatalogGift>()
     var boosted by mutableStateOf(false)
     var notificationsOn by mutableStateOf(true)
     var chatSounds by mutableStateOf(true)
@@ -53,16 +68,36 @@ class AppStore(
     val blockedIds = mutableStateListOf<String>()
     val directory = mutableStateListOf<Person>()
     val discoverPeople = mutableStateListOf<Person>()
+    val blockedByIds = mutableStateListOf<String>()
+    var discoverLoadingMore by mutableStateOf(false)
+        private set
     val conversations = mutableStateListOf<Conversation>()
     val notices = mutableStateListOf<Notice>()
 
     private var sequence = 0
+    private var statsListener: ListenerRegistration? = null
+    private var giftListener: ListenerRegistration? = null
+    private var blockListener: ListenerRegistration? = null
+    private var blockedByListener: ListenerRegistration? = null
+    private var discoverGender: String? = null
+    private var discoverCountry: String? = null
+    private var discoverHasMore = true
+    private val discoverLock = Mutex()
+    private val presence = mutableStateMapOf<String, PresenceState>()
+    private var settingsListener: ListenerRegistration? = null
+    private var settingsKnown = false
+    private var usageKnown = false
     var discoverError by mutableStateOf<String?>(null)
 
     val unreadChats: Int get() = conversations.sumOf { it.unread }
+    val freeMessagesLeft: Int get() = (freeMessageQuota - freeMessagesUsed).coerceAtLeast(0)
     val unreadNotices: Int get() = notices.count { !it.read }
 
     init {
+        account.bindPresence(
+            onUpdate = { uid, online, at -> presence[uid] = PresenceState(online, at) },
+            onClear = { uid -> presence.remove(uid) },
+        )
         directory.addAll(samplePeople())
         friendIds.addAll(listOf("p1", "p2"))
         requestIds.addAll(listOf("p3", "p4"))
@@ -86,6 +121,17 @@ class AppStore(
 
     fun person(id: String): Person? = discoverPeople.find { it.id == id } ?: directory.find { it.id == id }
 
+    fun live(person: Person): Person {
+        val state = presence[person.id] ?: return person
+        val seen = if (state.lastChanged > 0L) state.lastChanged else person.lastSeen
+        if (state.online == person.online && seen == person.lastSeen) return person
+        return person.copy(online = state.online, lastSeen = seen)
+    }
+
+    fun watchPresence(scope: String, ids: Collection<String>) {
+        account.watchPresence(scope, ids)
+    }
+
     fun toggleFavorite(id: String) {
         if (id in favorites) favorites.remove(id) else favorites.add(id)
     }
@@ -107,10 +153,12 @@ class AppStore(
         requestIds.remove(id)
         favorites.remove(id)
         conversations.removeAll { it.personId == id }
+        account.saveBlock(userId, id, blocked = true)
     }
 
     fun unblock(id: String) {
         blockedIds.remove(id)
+        account.saveBlock(userId, id, blocked = false)
     }
 
     fun fileReport(personId: String, reason: String, note: String) {
@@ -141,16 +189,87 @@ class AppStore(
         photoMessage = null
     }
 
-    suspend fun refreshDiscover() {
+    suspend fun reloadDiscover(gender: String?, country: String?) {
         if (!signedIn || userId.isBlank()) return
-        try {
-            val people = account.loadDiscoverProfiles(userId).map { profile -> profile.toDiscoverPerson() }
-            discoverPeople.clear()
-            discoverPeople.addAll(people)
+        discoverLock.withLock {
+            val changed = gender != discoverGender || country != discoverCountry
+            discoverGender = gender
+            discoverCountry = country
+            if (changed) discoverPeople.clear()
+            discoverHasMore = true
             discoverError = null
-        } catch (_: Exception) {
-            discoverError = "Couldn't load people. Check your connection and pull to try again."
+            try {
+                val next = mutableListOf<Person>()
+                collectDiscover(next, reset = true)
+                discoverPeople.clear()
+                discoverPeople.addAll(next)
+            } catch (error: Exception) {
+                discoverError = discoverFailure(error)
+            }
         }
+    }
+
+    suspend fun loadMoreDiscover() {
+        if (!signedIn || userId.isBlank() || !discoverHasMore || discoverLoadingMore) return
+        discoverLock.withLock {
+            if (!discoverHasMore) return@withLock
+            discoverLoadingMore = true
+            try {
+                val next = mutableListOf<Person>()
+                collectDiscover(next, reset = false)
+                val seen = discoverPeople.map { it.id }.toSet()
+                discoverPeople.addAll(next.filter { it.id !in seen })
+            } catch (error: Exception) {
+                discoverError = discoverFailure(error)
+            } finally {
+                discoverLoadingMore = false
+            }
+        }
+    }
+
+    suspend fun seedTestUsers() {
+        account.seedTestUsers()
+        reloadDiscover(discoverGender, discoverCountry)
+    }
+
+    suspend fun deleteTestUsers() {
+        account.deleteTestUsers()
+        reloadDiscover(discoverGender, discoverCountry)
+    }
+
+    private suspend fun collectDiscover(into: MutableList<Person>, reset: Boolean) {
+        var resetCursor = reset
+        var rounds = 0
+        while (into.size < 20 && discoverHasMore && rounds < 6) {
+            val page = account.fetchDiscoverPage(discoverGender, discoverCountry, resetCursor)
+            resetCursor = false
+            discoverHasMore = page.hasMore
+            page.profiles.forEach { profile ->
+                if (!acceptDiscover(profile)) return@forEach
+                if (into.any { it.id == profile.uid }) return@forEach
+                into += profile.toDiscoverPerson()
+            }
+            rounds += 1
+        }
+    }
+
+    private fun acceptDiscover(profile: UserProfile): Boolean {
+        if (profile.uid == userId) return false
+        if (profile.uid in blockedIds || profile.uid in blockedByIds) return false
+        if (!BuildConfig.DEBUG && profile.isTestUser) return false
+        return true
+    }
+
+    private fun discoverFailure(error: Exception): String {
+        val detail = error.message.orEmpty()
+        return if (detail.contains("http", ignoreCase = true)) detail
+        else "Couldn't load people. Check your connection and pull to try again."
+    }
+
+    private fun hideBlockedPeople() {
+        val hidden = blockedIds.toSet() + blockedByIds.toSet()
+        if (hidden.isEmpty()) return
+        discoverPeople.removeAll { it.id in hidden }
     }
 
     fun restore(profile: UserProfile) {
@@ -166,6 +285,8 @@ class AppStore(
         createdAt = profile.createdAt
         coins = profile.coins
         level = profile.level
+        watchAccount(profile.uid)
+        writes.launch { account.ensureDeviceRegistered() }
         val local = account.localPhotos(profile.uid)
         repeat(3) { index -> photos[index] = local.getOrNull(index) }
         signedIn = profile.onboardingCompleted
@@ -256,40 +377,104 @@ class AppStore(
         conversations.find { it.personId == personId }?.unread = 0
     }
 
-    fun sendText(personId: String, text: String) {
-        val clean = text.trim()
-        if (clean.isEmpty()) return
+    fun showOutgoing(personId: String, messageId: String, text: String) {
         val conversation = openConversation(personId)
-        conversation.messages.add(
-            ChatMessage(nextId(), true, clean, clockNow()),
-        )
-        conversation.timeLabel = clockNow()
-        bump(conversation)
+        val index = conversation.messages.indexOfFirst { it.id == messageId }
+        if (index >= 0) {
+            val current = conversation.messages[index]
+            conversation.messages[index] = current.copy(delivery = MessageDelivery.Sending)
+        } else {
+            conversation.messages.add(
+                ChatMessage(messageId, true, text, clockNow(), delivery = MessageDelivery.Sending),
+            )
+            conversation.timeLabel = clockNow()
+            bump(conversation)
+        }
     }
 
-    fun sendGift(personId: String, gift: GiftKind, free: Boolean = false): Boolean {
-        if (!free && coins < gift.price) return false
-        if (!free) coins -= gift.price
-        giftsSent += 1
-        val conversation = openConversation(personId)
-        conversation.messages.add(
-            ChatMessage(nextId(), true, gift.title, clockNow(), gift),
-        )
-        conversation.timeLabel = clockNow()
-        bump(conversation)
-        return true
+    fun newMessageId(): String = java.util.UUID.randomUUID().toString().replace("-", "")
+
+    suspend fun sendText(personId: String, messageId: String, text: String): TextSendResult {
+        val clean = text.trim()
+        if (clean.isEmpty() || clean.length > 1000) {
+            markDelivery(personId, messageId, MessageDelivery.Failed)
+            return TextSendResult.Failed("Write a message first.")
+        }
+        if (userId.isBlank() || personId == userId) {
+            markDelivery(personId, messageId, MessageDelivery.Failed)
+            return TextSendResult.Failed("You can't message yourself.")
+        }
+        val chatId = account.chatIdFor(userId, personId)
+        return when (val result = account.sendMessage(chatId, personId, clean, messageId)) {
+            is MessageCallResult.Sent -> {
+                coins = result.coins
+                if (freeMessageQuota > 0) {
+                    freeMessagesUsed = (freeMessageQuota - result.freeMessagesLeft).coerceAtLeast(0)
+                }
+                markDelivery(personId, messageId, MessageDelivery.Sent)
+                TextSendResult.Sent
+            }
+            MessageCallResult.NoFreeMessages -> {
+                markDelivery(personId, messageId, MessageDelivery.Failed)
+                TextSendResult.NoFreeMessages
+            }
+            is MessageCallResult.Failed -> {
+                markDelivery(personId, messageId, MessageDelivery.Failed)
+                TextSendResult.Failed(result.message)
+            }
+        }
+    }
+
+    private fun markDelivery(personId: String, messageId: String, delivery: MessageDelivery) {
+        val conversation = conversations.find { it.personId == personId } ?: return
+        val index = conversation.messages.indexOfFirst { it.id == messageId }
+        if (index >= 0) {
+            conversation.messages[index] = conversation.messages[index].copy(delivery = delivery)
+        }
+    }
+
+    suspend fun sendGift(personId: String, gift: CatalogGift): GiftSendResult {
+        if (userId.isBlank() || personId == userId) {
+            return GiftSendResult.Failed("You can't send a gift to yourself.")
+        }
+        val chatId = account.chatIdFor(userId, personId)
+        return when (val result = account.sendGift(personId, gift.id, chatId)) {
+            is GiftCallResult.Sent -> {
+                coins = result.balance
+                val kind = GiftKind.entries.find { it.name.equals(gift.id, ignoreCase = true) }
+                val conversation = openConversation(personId)
+                conversation.messages.add(
+                    ChatMessage(nextId(), true, gift.name, clockNow(), kind),
+                )
+                conversation.timeLabel = clockNow()
+                bump(conversation)
+                GiftSendResult.Sent(gift.name)
+            }
+            GiftCallResult.Insufficient -> GiftSendResult.Insufficient
+            is GiftCallResult.Failed -> GiftSendResult.Failed(result.message)
+        }
+    }
+
+    suspend fun ensureGiftCatalog() {
+        account.ensureGiftCatalog()
+    }
+
+    fun listenLedger(onUpdate: (List<LedgerEntry>) -> Unit): ListenerRegistration? {
+        return account.listenLedger(userId, onUpdate)
     }
 
     fun canAffordCall(): Boolean = coins >= CallCost
 
-    fun chargeCall(): Boolean {
-        if (coins < CallCost) return false
-        coins -= CallCost
-        return true
-    }
-
-    fun grantCoins(amount: Int) {
-        coins += amount
+    suspend fun chargeCall(otherUid: String): Boolean {
+        if (discoverPeople.none { it.id == otherUid }) return coins >= CallCost
+        return when (val result = account.chargeCall(otherUid)) {
+            is CallChargeResult.Charged -> {
+                coins = result.balance
+                true
+            }
+            CallChargeResult.Insufficient -> false
+            CallChargeResult.Failed -> false
+        }
     }
 
     suspend fun deleteAccount() {
@@ -315,7 +500,14 @@ class AppStore(
         age = 21
         gender = Gender.Female
         country = Countries.first()
-        coins = StartingCoins
+        coins = 0
+        freeMessagesUsed = 0
+        freeMessageQuota = 0
+        messageCost = 0
+        rewardAdFreeMessages = 0
+        messageAllowanceKnown = false
+        settingsKnown = false
+        usageKnown = false
         level = 1
         photos[0] = null
         photos[1] = null
@@ -333,8 +525,56 @@ class AppStore(
         requestIds.clear()
         favorites.clear()
         blockedIds.clear()
+        blockedByIds.clear()
         giftsSent = 0
+        giftCatalog.clear()
+        statsListener?.remove()
+        giftListener?.remove()
+        blockListener?.remove()
+        blockedByListener?.remove()
+        settingsListener?.remove()
+        statsListener = null
+        giftListener = null
+        blockListener = null
+        blockedByListener = null
+        settingsListener = null
         boosted = false
+    }
+
+    private fun watchAccount(uid: String) {
+        statsListener?.remove()
+        giftListener?.remove()
+        blockListener?.remove()
+        blockedByListener?.remove()
+        settingsListener?.remove()
+        statsListener = account.listenStats(uid) { nextCoins, sent, used ->
+            coins = nextCoins
+            if (sent != null) giftsSent = sent
+            freeMessagesUsed = used
+            usageKnown = true
+            messageAllowanceKnown = settingsKnown
+        }
+        settingsListener = account.listenAppSettings { free, cost, reward ->
+            freeMessageQuota = free
+            messageCost = cost
+            rewardAdFreeMessages = reward
+            settingsKnown = true
+            messageAllowanceKnown = usageKnown
+        }
+        giftListener = account.listenGifts { next ->
+            giftCatalog.clear()
+            giftCatalog.addAll(next)
+        }
+        blockListener = account.listenBlocks(uid) { ids ->
+            blockedIds.clear()
+            blockedIds.addAll(ids)
+            hideBlockedPeople()
+        }
+        blockedByListener = account.listenBlockedBy(uid) { ids ->
+            blockedByIds.clear()
+            blockedByIds.addAll(ids)
+            hideBlockedPeople()
+        }
     }
 
     private fun bump(conversation: Conversation) {
@@ -364,7 +604,7 @@ class AppStore(
 
 private fun UserProfile.toDiscoverPerson(): Person {
     val approved = photos.mapNotNull { photo ->
-        photo?.takeIf { it.status == PhotoStatus.Approved }?.url
+        photo?.takeIf { it.status == PhotoStatus.Approved && it.url.startsWith("https://") }?.url
     }
     val bucket = uid.hashCode().and(Int.MAX_VALUE)
     return Person(
@@ -385,7 +625,29 @@ private fun UserProfile.toDiscoverPerson(): Person {
         panels = approved.size.coerceAtLeast(1),
         photoUrl = approved.firstOrNull(),
         photoUrls = approved,
+        username = username,
+        lastSeen = lastSeen,
     )
+}
+
+internal fun presenceLabel(online: Boolean, lastSeen: Long, now: Long = System.currentTimeMillis()): String {
+    if (online) return "Online"
+    if (lastSeen <= 0L) return "Offline"
+    val minutes = ((now - lastSeen) / 60_000L).coerceAtLeast(0L)
+    if (minutes < 1L) return "Active just now"
+    if (minutes < 60L) return "Active ${minutes}m ago"
+    if (minutes < 60L * 24L) return "Active ${minutes / 60L}h ago"
+    val seen = Calendar.getInstance().apply { timeInMillis = lastSeen }
+    val startOfToday = Calendar.getInstance().apply {
+        timeInMillis = now
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+    val startOfYesterday = (startOfToday.clone() as Calendar).apply { add(Calendar.DATE, -1) }
+    if (!seen.before(startOfYesterday) && seen.before(startOfToday)) return "Active yesterday"
+    return "Active ${(minutes / (60L * 24L)).coerceAtLeast(2L)}d ago"
 }
 
 private val portraitColors = listOf(
